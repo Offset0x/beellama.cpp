@@ -8,6 +8,8 @@ BeeLlama.cpp (or just Bee) is a performance-focused llama.cpp fork for squeezing
 
 Here's a [plug-and-play Qwen 3.6 27B setup](docs/quickstart-qwen36-dflash.md) with a config to run it in Q5 + 200k of practically lossless KV cache + vision on a single RTX 3090 or 4090.
 
+[![Support my work!](https://anbeeld.com/images/support.jpg)](https://anbeeld.com/support)
+
 ## Fork Features
 
 - **DFlash speculative decoding**: `--spec-type dflash` drives a DFlash draft GGUF alongside the target model. The target captures hidden states into a per-layer 4096-slot ring buffer, the drafter cross-attends to the most recent `--spec-dflash-cross-ctx` hidden-state tokens and proposes drafts for target verification.
@@ -23,8 +25,6 @@ Here's a [plug-and-play Qwen 3.6 27B setup](docs/quickstart-qwen36-dflash.md) wi
 For the full feature and public-repo comparison, read [docs/beellama-features.md](docs/beellama-features.md). For the complete argument reference, read [docs/beellama-args.md](docs/beellama-args.md).
 
 TurboQuant (WHT-based scalar quantization) originates from [TheTom/llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant). TCQ (Trellis-Coded Quantization) and basic DFlash implementation originate from [spiritbuun/buun-llama-cpp](https://github.com/spiritbuun/buun-llama-cpp) (paper: [Closing the Gap: Trellis-Coded Quantization for KV Cache at 2-3 Bits](https://huggingface.co/datasets/spiritbuun/turboquant-tcq-kv-cache)).
-
-[![Support my work!](https://anbeeld.com/images/support.jpg)](https://anbeeld.com/support)
 
 ## DFlash Speedup
 
