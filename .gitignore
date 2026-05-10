@@ -167,6 +167,7 @@ AGENTS.local.md
 # BeeLlama local artifacts
 
 /artifacts/
+/release-packages/*/
 /servers
 
 # Codebooks are intentionally tracked despite *.bin
