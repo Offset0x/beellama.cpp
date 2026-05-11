@@ -255,7 +255,7 @@ struct common_speculative_state {
 
     // called after verification decode with logits still in ctx
     // batch_tokens: tokens that were in the batch [id_last, draft0, draft1, ...]
-    // n_accepted: how many were accepted (ids.size(), including the bonus token)
+    // n_accepted: number of decoded batch rows to commit (root + accepted draft tokens)
     virtual void update_logits(llama_context * /*ctx*/, const llama_tokens & /*batch_tokens*/, int /*n_accepted*/) {}
 
     // tree variant: accept specific capture-buffer indices instead of a contiguous block.
@@ -2106,9 +2106,9 @@ struct common_speculative_state_dflash : public common_speculative_state {
     void update_logits(llama_context * ctx, const llama_tokens & batch_tokens, int n_accepted) override {
         GGML_UNUSED(ctx);
         GGML_UNUSED(batch_tokens);
-        // n_accepted includes the bonus token: [id_last, draft0, ..., draftN-1] → accepted count
-        // the verification batch had (1 + n_draft) tokens
-        // only the first n_accepted tokens' hidden states should be kept
+        // In this path n_accepted means committed hidden-state rows, not output-token count.
+        // [id_last, draft0, ..., draftN-1] => root + accepted draft tokens.
+        // Boundary stops pass root + accepted draft tokens even when no bonus token was sampled.
         append_target_hiddens(n_accepted);
     }
 

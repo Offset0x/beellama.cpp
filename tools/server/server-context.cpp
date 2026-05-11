@@ -50,6 +50,58 @@ static bool dflash_server_profile_enabled() {
     return enabled;
 }
 
+static bool server_tail_pos_is_in_code_fence(
+        const std::string & text,
+        size_t              pos) {
+    bool in_fence = false;
+    size_t search = 0;
+    while (search < pos) {
+        const size_t fence = text.find("```", search);
+        if (fence == std::string::npos || fence >= pos) {
+            break;
+        }
+        in_fence = !in_fence;
+        search = fence + 3;
+    }
+    return in_fence;
+}
+
+static bool server_tail_tool_marker_has_boundary(
+        const std::string & text,
+        size_t              pos) {
+    if (pos == 0) {
+        return true;
+    }
+
+    const char prev = text[pos - 1];
+    return prev == '\n' || prev == '\r' || prev == '\t' || prev == ' ' || prev == '>';
+}
+
+static bool server_tail_has_tool_call_marker(const std::string & text, size_t scan_from) {
+    static const char * markers[] = {
+        "<tool_call",
+        "</tool_call",
+        "<function=",
+        "</function>",
+        "<parameter=",
+        "</parameter>",
+    };
+
+    const size_t tail_pos = text.size() > 256 ? text.size() - 256 : 0;
+    const size_t start = std::max(scan_from, tail_pos);
+    for (const char * marker : markers) {
+        size_t pos = text.find(marker, start);
+        while (pos != std::string::npos) {
+            if (server_tail_tool_marker_has_boundary(text, pos) &&
+                    !server_tail_pos_is_in_code_fence(text, pos)) {
+                return true;
+            }
+            pos = text.find(marker, pos + 1);
+        }
+    }
+    return false;
+}
+
 struct log_norm_cache {
     std::vector<float> cache;
     float inv_temp;
@@ -148,6 +200,9 @@ static std::vector<llama_token> speculative_reject_sample(
             common_sampler_accept(smpl, target_token, true);
             result.push_back(target_token);
             n_exact++;
+            if (common_sampler_blocks_speculative(smpl)) {
+                break;
+            }
             continue;
         }
 
@@ -170,6 +225,9 @@ static std::vector<llama_token> speculative_reject_sample(
             common_sampler_accept(smpl, draft[i], true);
             result.push_back(draft[i]);
             n_prob_accept++;
+            if (common_sampler_blocks_speculative(smpl)) {
+                break;
+            }
         } else {
             common_sampler_accept(smpl, target_token, true);
             result.push_back(target_token);
@@ -178,13 +236,34 @@ static std::vector<llama_token> speculative_reject_sample(
         }
     }
 
-    if (result.size() == draft.size()) {
+    if (result.size() == draft.size() && !common_sampler_blocks_speculative(smpl)) {
         const llama_token bonus = common_sampler_sample(smpl, ctx_tgt, idxs[draft.size()]);
         common_sampler_accept(smpl, bonus, true);
         result.push_back(bonus);
     }
 
     return result;
+}
+
+static bool speculative_flat_result_has_bonus(
+        const llama_tokens          & ids,
+        const llama_tokens          & draft,
+        const struct common_sampler * smpl) {
+    if (ids.empty()) {
+        return false;
+    }
+
+    if (!common_sampler_blocks_speculative(smpl) || ids.size() > draft.size()) {
+        return true;
+    }
+
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (ids[i] != draft[i]) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 struct dflash_reduced_verify_plan {
@@ -408,6 +487,8 @@ struct server_slot : server_adaptive_dm_state {
     bool loop_guard_triggered = false;
     std::string loop_guard_action;
     std::string loop_guard_reason;
+    bool reasoning_tool_marker_logged = false;
+    bool dflash_suppressed_for_reasoning_tool_marker = false;
     int32_t reasoning_output_tokens = 0;
     int32_t visible_output_tokens = 0;
 
@@ -511,6 +592,8 @@ struct server_slot : server_adaptive_dm_state {
         loop_guard_triggered = false;
         loop_guard_action = "";
         loop_guard_reason = "";
+        reasoning_tool_marker_logged = false;
+        dflash_suppressed_for_reasoning_tool_marker = false;
         reasoning_output_tokens = 0;
         visible_output_tokens = 0;
         stopping_word  = "";
@@ -2176,6 +2259,7 @@ private:
         // search stop word and delete it
         if (!incomplete) {
             size_t pos = std::min(slot.n_sent_text, slot.generated_text.size());
+            const size_t marker_scan_pos = pos > 64 ? pos - 64 : 0;
 
             const std::string str_test = slot.generated_text.substr(pos);
             bool send_text = true;
@@ -2199,6 +2283,27 @@ private:
                 // add the token to slot queue and cache
             } else {
                 result.text_to_send = "";
+            }
+
+            if (slot.has_next_token &&
+                    !slot.reasoning_tool_marker_logged &&
+                    slot.task->params.sampling.grammar_lazy &&
+                    !slot.task->params.sampling.grammar_triggers.empty()) {
+                const auto reasoning_state = common_sampler_get_reasoning_budget_state(slot.smpl.get());
+                const bool in_reasoning =
+                    reasoning_state == REASONING_BUDGET_COUNTING ||
+                    reasoning_state == REASONING_BUDGET_WAITING_UTF8;
+
+                if (server_tail_has_tool_call_marker(slot.generated_text, marker_scan_pos)) {
+                    slot.reasoning_tool_marker_logged = true;
+                    slot.dflash_suppressed_for_reasoning_tool_marker = true;
+                    SLT_WRN(slot,
+                            "raw tool marker observed while lazy grammar is enabled; suppressing DFlash for this response without changing sampler state in_reasoning=%d n_decoded=%d reasoning_tokens=%d visible_tokens=%d\n",
+                            in_reasoning ? 1 : 0,
+                            slot.n_decoded,
+                            slot.reasoning_output_tokens,
+                            slot.visible_output_tokens);
+                }
             }
 
             slot.add_token(result);
@@ -3199,13 +3304,17 @@ private:
             // generate draft tokens in speculative decoding mode
             const int n_draft_max = slot.get_n_draft_max(params_base, true);
 
-            // For DFlash: when grammar is actively constraining, skip speculation
-            // instead of drafting and then falling back to full-vocab accept.
-            const bool dflash_grammar_active =
+            // For DFlash: when grammar or reasoning state needs the normal
+            // token-by-token sampler, skip drafting instead of crossing parser
+            // boundaries inside one speculative accept cycle.
+            const bool dflash_sampler_blocks_speculative =
                 params_base.speculative.type == COMMON_SPECULATIVE_TYPE_DFLASH &&
-                slot.smpl && !common_sampler_supports_reduced(slot.smpl.get());
+                slot.smpl && common_sampler_blocks_speculative(slot.smpl.get());
+            const bool dflash_tool_marker_suppressed =
+                params_base.speculative.type == COMMON_SPECULATIVE_TYPE_DFLASH &&
+                slot.dflash_suppressed_for_reasoning_tool_marker;
 
-            if (n_draft_max > 0 && !dflash_grammar_active) {
+            if (n_draft_max > 0 && !dflash_sampler_blocks_speculative && !dflash_tool_marker_suppressed) {
                 const int64_t t_draft_slot_start = ggml_time_us();
                 if (mctx && params_base.speculative.type != COMMON_SPECULATIVE_TYPE_DFLASH) {
                     GGML_ABORT("not supported by multimodal");
@@ -4332,6 +4441,9 @@ private:
                 llama_tokens ids;
                 int  tree_commit_n = 0;
                 bool tree_accepted_on_main_path = true;
+                bool speculative_has_bonus = true;
+                int  n_accepted_draft = 0;
+                int  n_hidden_keep = 0;
                 std::vector<int> capture_indices;  // populated in tree path, used after rollback
 
                 if (is_draft_tree) {
@@ -4349,13 +4461,18 @@ private:
 
                         auto it = slot.draft_tree.child_maps[current].find(id);
                         if (it != slot.draft_tree.child_maps[current].end()) {
+                            const int accepted_child = it->second;
                             common_sampler_accept(slot.smpl.get(), id, true);
-                            current = it->second;
+                            current = accepted_child;
                             tree_commit_n = current;
                             if (current > slot.draft_tree.main_path_len) {
                                 tree_accepted_on_main_path = false;
                             }
                             slot.n_reject_exact++;
+                            if (common_sampler_blocks_speculative(slot.smpl.get())) {
+                                speculative_has_bonus = false;
+                                break;
+                            }
                             continue;
                         }
 
@@ -4387,6 +4504,10 @@ private:
                                         tree_accepted_on_main_path = false;
                                     }
                                     slot.n_reject_prob_accept++;
+                                    if (common_sampler_blocks_speculative(slot.smpl.get())) {
+                                        speculative_has_bonus = false;
+                                        break;
+                                    }
                                     continue;
                                 }
                             }
@@ -4454,6 +4575,10 @@ private:
                     GGML_ASSERT(slot.remaining_generation_budget(params_base) == -1 ||
                             (int32_t) ids.size() <= slot.remaining_generation_budget(params_base));
 
+                    speculative_has_bonus = speculative_flat_result_has_bonus(ids, slot.spec_draft, slot.smpl.get());
+                    n_accepted_draft = std::max(0, (int) ids.size() - (speculative_has_bonus ? 1 : 0));
+                    n_hidden_keep = ids.empty() ? 0 : n_accepted_draft + 1;
+
                     // update DFlash hidden state ring + CopySpec prompt window with accepted tokens.
                     // Must run BEFORE rollback (matches speculative-simple ordering) and BEFORE clearing
                     // slot.spec_draft so batch_tokens reflects the full verification batch [id_last, drafts].
@@ -4463,7 +4588,7 @@ private:
                     llama_tokens batch_tokens;
                     batch_tokens.push_back(slot.sampled);
                     batch_tokens.insert(batch_tokens.end(), slot.spec_draft.begin(), slot.spec_draft.end());
-                    common_speculative_update_logits(slot.spec.get(), ctx, batch_tokens, (int) ids.size());
+                    common_speculative_update_logits(slot.spec.get(), ctx, batch_tokens, n_hidden_keep);
                     profile_accept_lap(profile_accept_update_us);
                 }
 
@@ -4487,12 +4612,17 @@ private:
                     continue;
                 }
 
+                if (is_draft_tree) {
+                    n_accepted_draft = std::max(0, (int) ids.size() - (speculative_has_bonus ? 1 : 0));
+                    n_hidden_keep = n_accepted_draft + 1;
+                }
+
                 // update how many tokens out of those tested were accepted
-                slot.n_draft_accepted += ids.size() - 1;
+                slot.n_draft_accepted += n_accepted_draft;
 
                 // adaptive dm: collect shared telemetry, then let the selected controller own n_max.
                 if (slot.dm_adaptive && !is_draft_tree) {
-                    const int n_accepted = (int)ids.size() - 1;
+                    const int n_accepted = n_accepted_draft;
                     slot.observe_profit_acceptance((int) n_draft, n_accepted);
                     slot.profit_pending = true;
                     slot.profit_pending_n_draft = (int32_t) n_draft;
@@ -4603,7 +4733,7 @@ private:
                 }
 
                 // inform the speculative decoding about the number of accepted tokens
-                common_speculative_accept(slot.spec.get(), ids.size() - 1);
+                common_speculative_accept(slot.spec.get(), n_accepted_draft);
 
                 // rollback to the state before sampling the draft tokens
                 if (is_draft_tree) {
@@ -4613,12 +4743,13 @@ private:
                 }
 
                 // add accepted tokens to the prompt
-                slot.prompt.tokens.insert(llama_tokens(ids.begin(), ids.end() - 1));
+                const size_t n_prompt_insert = std::min(ids.size(), (size_t) n_accepted_draft);
+                slot.prompt.tokens.insert(llama_tokens(ids.begin(), ids.begin() + n_prompt_insert));
                 profile_accept_lap(profile_accept_book_us);
 
                 if (slot.has_draft_backup) {
                     const llama_seq_id seq_backup = slot.id + n_parallel_user;
-                    const bool all_accepted_flat = (ids.size() == n_draft + 1) && !had_dflash_padding;
+                    const bool all_accepted_flat = (n_accepted_draft == (int) n_draft) && !had_dflash_padding;
 
                     if (params_base.speculative.type == COMMON_SPECULATIVE_TYPE_DFLASH && is_draft_tree) {
                         llama_dflash_set_active_slot(ctx, slot.id);
@@ -4722,7 +4853,7 @@ private:
                             llama_memory_seq_rm(mem, slot.id, slot.prompt.tokens.pos_next(), -1);
                         } else {
                             llama_clear_tree_parent_ids(ctx);
-                            llama_dflash_rollback(ctx, slot.id, seq_backup, slot.n_pos_before_draft, (int) ids.size());
+                            llama_dflash_rollback(ctx, slot.id, seq_backup, slot.n_pos_before_draft, n_hidden_keep);
                         }
                     } else {
                         // Generic: backup-restore + re-decode for other speculative types
@@ -4810,7 +4941,7 @@ private:
                             (ggml_time_us() - profile_accept_start) / 1e3);
                 }
 
-                SLT_DBG(slot, "accepted %d/%d draft tokens, new n_tokens = %d\n", (int) ids.size() - 1, (int) n_draft, slot.prompt.n_tokens());
+                SLT_DBG(slot, "accepted %d/%d draft tokens, new n_tokens = %d\n", n_accepted_draft, (int) n_draft, slot.prompt.n_tokens());
             }
             t_accept_total += ggml_time_us() - t_accept_start;
         }
@@ -5130,25 +5261,31 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             return res; // connection is closed
         }
 
-        if (first_result->is_error()) {
-            res->error(first_result->to_json());
+        try {
+            if (first_result->is_error()) {
+                res->error(first_result->to_json());
+                return res;
+            }
+
+            GGML_ASSERT(
+                dynamic_cast<server_task_result_cmpl_partial*>(first_result.get()) != nullptr ||
+                dynamic_cast<server_task_result_cmpl_final*>  (first_result.get()) != nullptr
+            );
+
+            // next responses are streamed
+            // to be sent immediately
+            json first_result_json = first_result->to_json();
+            if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
+                res->data = format_anthropic_sse(first_result_json);
+            } else if (res_type == TASK_RESPONSE_TYPE_OAI_RESP) {
+                res->data = format_oai_resp_sse(first_result_json);
+            } else {
+                res->data = format_oai_sse(first_result_json);
+            }
+        } catch (const std::exception & e) {
+            SRV_ERR("failed to serialize first streaming result: %s\n", e.what());
+            res->error(format_error_response(e.what(), ERROR_TYPE_SERVER));
             return res;
-        }
-
-        GGML_ASSERT(
-            dynamic_cast<server_task_result_cmpl_partial*>(first_result.get()) != nullptr ||
-            dynamic_cast<server_task_result_cmpl_final*>  (first_result.get()) != nullptr
-        );
-
-        // next responses are streamed
-        // to be sent immediately
-        json first_result_json = first_result->to_json();
-        if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
-            res->data = format_anthropic_sse(first_result_json);
-        } else if (res_type == TASK_RESPONSE_TYPE_OAI_RESP) {
-            res->data = format_oai_resp_sse(first_result_json);
-        } else {
-            res->data = format_oai_sse(first_result_json);
         }
         res->status = 200;
         res->content_type = "text/event-stream";

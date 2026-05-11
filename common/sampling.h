@@ -67,6 +67,7 @@ struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl);
 llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_context * ctx, int idx, bool grammar_first = false);
 
 bool common_sampler_supports_reduced(struct common_sampler * gsmpl);
+bool common_sampler_blocks_speculative(const struct common_sampler * gsmpl);
 
 // generalized version of common_sampler_sample
 //

@@ -653,19 +653,38 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
     return id;
 }
 
+static bool common_sampler_has_speculative_unsafe_grammar(const struct common_sampler * gsmpl) {
+    if (!gsmpl || !gsmpl->grmr) {
+        return false;
+    }
+
+    // Lazy grammars are safe to speculate while still awaiting their trigger.
+    // Once triggered, grammar-constrained regions need normal full-vocab
+    // sampling and one-token streaming/parser boundaries.
+    return llama_sampler_grammar_is_active(gsmpl->grmr);
+}
+
+bool common_sampler_blocks_speculative(const struct common_sampler * gsmpl) {
+    if (!gsmpl) {
+        return true;
+    }
+    if (common_sampler_has_speculative_unsafe_grammar(gsmpl)) {
+        return true;
+    }
+    return common_reasoning_budget_get_state(gsmpl->rbudget) == REASONING_BUDGET_FORCING;
+}
+
 bool common_sampler_supports_reduced(struct common_sampler * gsmpl) {
     if (!gsmpl) {
         return false;
     }
-    // A grammar sampler exists but may be lazy+inactive (awaiting trigger).
-    // Only reject when grammar is actively constraining tokens.
-    if (gsmpl->grmr && llama_sampler_grammar_is_active(gsmpl->grmr)) {
+    if (common_sampler_has_speculative_unsafe_grammar(gsmpl)) {
         return false;
     }
-    if (common_reasoning_budget_get_state(gsmpl->rbudget) == REASONING_BUDGET_FORCING) {
-        return false;
+    if (common_reasoning_budget_get_state(gsmpl->rbudget) != REASONING_BUDGET_FORCING) {
+        return true;
     }
-    return true;
+    return false;
 }
 
 std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, bool grammar_first) {
@@ -681,6 +700,10 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sample
         common_sampler_accept(gsmpl, id, true);
 
         result.push_back(id);
+
+        if (common_sampler_blocks_speculative(gsmpl)) {
+            break;
+        }
 
         if (draft[i] != id) {
             break;
@@ -759,6 +782,10 @@ std::vector<llama_token> common_sampler_sample_reduced_and_accept_n(
 
         common_sampler_accept(gsmpl, id, true);
         result.push_back(id);
+
+        if (common_sampler_blocks_speculative(gsmpl)) {
+            break;
+        }
 
         if (draft[i] != id) {
             break;
