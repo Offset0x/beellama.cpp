@@ -11,7 +11,6 @@
 static constexpr int SERVER_ADAPTIVE_DM_PROFIT_POSITIONS  = 128;
 static constexpr int SERVER_ADAPTIVE_DM_PROFIT_DEPTHS     = SERVER_ADAPTIVE_DM_PROFIT_POSITIONS + 1;
 static constexpr int SERVER_ADAPTIVE_DM_PROFIT_CANDIDATES = SERVER_ADAPTIVE_DM_PROFIT_DEPTHS + 1;
-static constexpr int SERVER_ADAPTIVE_DM_PROFIT_BASELINE_REPROBE_MIN_BUCKET = 3;
 
 static inline int server_adaptive_dm_probe_n_max(int base_n_max, float probe_fraction) {
     if (base_n_max <= 0) {
@@ -278,7 +277,7 @@ struct server_adaptive_dm_state {
     float   dm_profit_ewma_alpha   = 0.15f;
     int32_t dm_profit_min_samples  = 3;
     int32_t dm_profit_warmup       = 0;
-    int32_t dm_profit_baseline_interval = 512;
+    int32_t dm_profit_baseline_interval = 1024;
 
     struct profit_depth_stats {
         int32_t samples = 0;
@@ -427,7 +426,6 @@ struct server_adaptive_dm_state {
             profit_baseline_ready() &&
             !profit_baseline_probe_pending &&
             adaptive_n_max > 0 &&
-            profit_key.context_bucket >= SERVER_ADAPTIVE_DM_PROFIT_BASELINE_REPROBE_MIN_BUCKET &&
             profit_cycles_since_baseline >= dm_profit_baseline_interval;
     }
 

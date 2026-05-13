@@ -375,7 +375,7 @@ int main() {
         assert(reprobe.decide_profit_n_max(8) == 8);
     }
 
-    // test periodic baseline reprobes wait until longer context buckets
+    // test periodic baseline reprobes are interval-based, not context-bucket gated
     {
         server_adaptive_dm_state early;
         early.dm_profit_min_samples = 1;
@@ -392,7 +392,7 @@ int main() {
         early.observe_profit_timing(0, 0.0f, 40.0f, 0.0f, 40.0f);
         early.observe_profit_acceptance(8, 7);
         early.observe_profit_timing(8, 8.0f, 30.0f, 2.0f, 40.0f);
-        assert(!early.profit_should_probe_baseline());
+        assert(early.profit_should_probe_baseline());
     }
 
     return 0;
