@@ -284,6 +284,46 @@ int main(int argc, char ** argv) {
         "DFlash converter must warn when using default metadata");
     ok &= expect(convert_py.find("DFlashDraftModel metadata:") != std::string::npos,
         "DFlash converter must print DFlash metadata summary");
+    // --- PR8 checks: DFlash runtime diagnostics, shape validation, env toggles, CUDA debug ---
+    ok &= expect(speculative.find("GGML_DFLASH_FORCE_CPU_CROSS") != std::string::npos,
+        "DFlash must support GGML_DFLASH_FORCE_CPU_CROSS env toggle");
+    ok &= expect(speculative.find("GGML_DFLASH_VERBOSE_CONTRACT") != std::string::npos,
+        "DFlash must support GGML_DFLASH_VERBOSE_CONTRACT env toggle");
+    ok &= expect(speculative.find("forced_cpu") != std::string::npos &&
+                 speculative.find("allowed=") != std::string::npos &&
+                 speculative.find("requested=") != std::string::npos,
+        "DFlash GPU hidden capture policy must log allowed/forced_cpu/requested");
+    ok &= expect(speculative.find("target_vocab") != std::string::npos &&
+                 speculative.find("drafter_vocab") != std::string::npos &&
+                 speculative.find("vocab_match") != std::string::npos &&
+                 speculative.find("capture_min") != std::string::npos &&
+                 speculative.find("capture_max") != std::string::npos,
+        "DFlash must log target/drafter vocab sizes and capture layer range");
+    ok &= expect(speculative.find("validate_target_hiddens") != std::string::npos,
+        "DFlash must have validate_target_hiddens method");
+    ok &= expect(speculative.find("hidden slot count mismatch") != std::string::npos,
+        "DFlash must warn on hidden slot count mismatch");
+    ok &= expect(speculative.find("hidden[%d] shape mismatch") != std::string::npos ||
+                 speculative.find("shape mismatch: embd=") != std::string::npos,
+        "DFlash must warn on hidden shape mismatch");
+    ok &= expect(speculative.find("GGML_DFLASH_FORCE_CPU_CROSS") != std::string::npos,
+        "DFlash must log when GPU cross ring is forced off by env var");
+    ok &= expect(dflash_draft.find("GGML_DFLASH_INPUT_DEBUG") != std::string::npos,
+        "DFlash drafter input must support GGML_DFLASH_INPUT_DEBUG env toggle");
+    ok &= expect(dflash_draft.find("feature mismatch single-slot") != std::string::npos,
+        "DFlash drafter input must log single-slot feature mismatch under debug");
+    ok &= expect(dflash_draft.find("feature mismatch multi-slot") != std::string::npos,
+        "DFlash drafter input must log multi-slot feature mismatch under debug");
+    ok &= expect(cuda_ring.find("GGML_DFLASH_CUDA_DEBUG") != std::string::npos,
+        "CUDA cross ring must support GGML_DFLASH_CUDA_DEBUG env toggle");
+    ok &= expect(cuda_ring.find("dflash cuda:") != std::string::npos,
+        "CUDA cross ring must log diagnostics under debug env");
+    ok &= expect(gemma4_iswa.find("inp_per_layer_reshape") != std::string::npos,
+        "Gemma4-ISWA must profile inp_per_layer reshape");
+    ok &= expect(gemma4_iswa.find("inp_per_layer_scaled") != std::string::npos,
+        "Gemma4-ISWA must profile inp_per_layer scale");
+    ok &= expect(gemma4_iswa.find("compact post-KV attention input/mask path") != std::string::npos,
+        "Gemma4-ISWA must document why early trim is unsafe");
     ok &= expect(qwen35.find("ggml_topk_ext(ctx0, cur, topk, 0.0f, 0)") != std::string::npos, "Qwen3.5 target verifier top-K must emit raw logit candidates");
     ok &= expect(qwen35moe.find("ggml_topk_ext(ctx0, cur, topk, 0.0f, 0)") != std::string::npos, "Qwen3.5-MoE target verifier top-K must emit raw logit candidates");
     ok &= expect(cuda_argmax.find("temp > 0.0f && seed != 0") != std::string::npos, "CUDA argmax/top-K must skip logsumexp for deterministic verifier top-K");
