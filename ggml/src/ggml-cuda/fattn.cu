@@ -36,7 +36,7 @@ void turbo_innerq_init_fattn() {
     cudaSetDevice(cur_device);
 }
 
-// Q² calibration: host-side management
+// QÂ² calibration: host-side management
 static int q_calibrate_state = 0; // 0=off, 1=collecting, 2=done
 
 void turbo_q_calibrate_init() {
@@ -57,7 +57,7 @@ void turbo_q_calibrate_init() {
     }
     cudaSetDevice(cur_device);
     q_calibrate_state = 1;
-    fprintf(stderr, "TURBO_Q_CALIBRATE: collecting per-position Q² statistics\n");
+    fprintf(stderr, "TURBO_Q_CALIBRATE: collecting per-position QÂ² statistics\n");
 }
 
 void turbo_q_calibrate_finalize() {
@@ -86,7 +86,7 @@ void turbo_q_calibrate_finalize() {
         return;
     }
 
-    // Compute E[Q²] per position and save as 128 float32 values
+    // Compute E[QÂ²] per position and save as 128 float32 values
     float weights[128];
     fprintf(stderr, "TURBO_Q_CALIBRATE: %d Q groups accumulated\n", count);
     double total = 0;
@@ -100,7 +100,7 @@ void turbo_q_calibrate_finalize() {
         if (weights[i] > maxw) maxw = weights[i];
         if (weights[i] < minw) minw = weights[i];
     }
-    fprintf(stderr, "  E[Q²] mean=%.6f min=%.6f max=%.6f ratio=%.2f\n",
+    fprintf(stderr, "  E[QÂ²] mean=%.6f min=%.6f max=%.6f ratio=%.2f\n",
             mean, minw, maxw, maxw / (minw > 1e-10f ? minw : 1e-10f));
 
     const char * path = "/tmp/q_weights.bin";
@@ -236,7 +236,7 @@ static void ggml_cuda_flash_attn_ext_mma_turbo_switch_ncols1(ggml_backend_cuda_c
         return;
     }
 
-    // Turing (sm_75) is capped at ncols=32 — the kernel has NO_DEVICE_CODE for ncols>32.
+    // Turing (sm_75) is capped at ncols=32 â€” the kernel has NO_DEVICE_CODE for ncols>32.
     if (ggml_cuda_highest_compiled_arch(cc) == GGML_CUDA_CC_TURING || Q->ne[1] <= 32/ncols2) {
         ggml_cuda_flash_attn_ext_mma_turbo_case<DKQ, DV, 32/ncols2, ncols2, type_K, type_V>(ctx, dst);
         return;
@@ -407,9 +407,9 @@ static void ggml_cuda_flash_attn_ext_mma_f16(ggml_backend_cuda_context & ctx, gg
 
 // Context-adaptive V alpha: logarithmic scaling based on current KV occupancy.
 // 3-bit: alpha = 1.1484 - 0.01443 * ln(n_kv), calibrated on Qwen3.5-27B decode-time KLD sweeps
-//   at 8K/16K/32K. Optima: 8K→1.020, 16K→1.005, 32K→1.000.
+//   at 8K/16K/32K. Optima: 8Kâ†’1.020, 16Kâ†’1.005, 32Kâ†’1.000.
 // 2-bit: alpha = 0.8865 + 0.0195 * ln(n_kv), calibrated on fine-grained 0.005-step decode-time
-//   KLD sweeps at 2K/7K/16K/32K on Qwen3.5-27B. Optima: 2K→1.030, 7K→1.065, 16K→1.090, 32K→1.075.
+//   KLD sweeps at 2K/7K/16K/32K on Qwen3.5-27B. Optima: 2Kâ†’1.030, 7Kâ†’1.065, 16Kâ†’1.090, 32Kâ†’1.075.
 // Override with TURBO_TCQ_DECODE_ALPHA_V env var to force a static alpha (disables adaptive).
 static float d_tcq_decode_alpha_v_static = 0.0f; // 0 = use adaptive, >0 = static override
 static float d_tcq_decode_alpha_k = 1.0f;       // K decode alpha, static (default 1.0)
@@ -421,12 +421,12 @@ static inline float tcq_compute_alpha_v(ggml_type v_type, int64_t n_kv) {
     const float ln_ctx = logf((float)n_kv);
     if (v_type == GGML_TYPE_TURBO3_TCQ) {
         // v3: 3-point fit from fine-grained KLD sweeps at 8K/16K/32K on Qwen3.5-27B.
-        // Per-token: n_kv=512→1.044, 2K→1.024, 8K→1.004, 16K→0.994, 32K→0.984
-        // Clamped [0.98, 1.06] — early tokens (small n_kv) use higher alpha.
+        // Per-token: n_kv=512â†’1.044, 2Kâ†’1.024, 8Kâ†’1.004, 16Kâ†’0.994, 32Kâ†’0.984
+        // Clamped [0.98, 1.06] â€” early tokens (small n_kv) use higher alpha.
         return fmaxf(0.98f, fminf(1.06f, 1.1484f - 0.01443f * ln_ctx));
     } else if (v_type == GGML_TYPE_TURBO2_TCQ) {
         // v2: 4-point fit from fine-grained 0.005-step KLD sweeps at 2K/7K/16K/32K.
-        // Per-token: n_kv=512→1.008, 2K→1.035, 7K→1.060, 16K→1.076, 32K→1.089
+        // Per-token: n_kv=512â†’1.008, 2Kâ†’1.035, 7Kâ†’1.060, 16Kâ†’1.076, 32Kâ†’1.089
         return fmaxf(1.00f, fminf(1.12f, 0.8865f + 0.0195f * ln_ctx));
     }
     return 1.0f;
@@ -850,7 +850,7 @@ static __global__ void k_turbo2_tcq_dequant_f16_inv_fwht(
 // q8_0 K dequant to f16 in TKHE layout, matching the turbo K dequant kernels.
 // Used at D=512 when K=q8_0 paired with V=turbo: produces (F16, F16) for the FA dispatch
 // and bypasses the (Q8_0, TURBO*) D=512 native VEC templates which have buggy SASS on
-// sm_120 PTX-JIT for some K/V combos. Q8_0 is in original (unrotated) domain → output too.
+// sm_120 PTX-JIT for some K/V combos. Q8_0 is in original (unrotated) domain â†’ output too.
 // 1 thread per element, 1 block per (token, head, batch).
 static __global__ void k_q8_0_dequant_f16_tkhe(
         const char * __restrict__ src, half * __restrict__ dst,
@@ -882,6 +882,92 @@ static size_t  kv_dequant_k_buf_size[GGML_CUDA_MAX_DEVICES] = {};
 static half * kv_dequant_v_buf[GGML_CUDA_MAX_DEVICES] = {};
 static size_t  kv_dequant_v_buf_size[GGML_CUDA_MAX_DEVICES] = {};
 
+// === Safe grow-buffer helper (alloc-before-free) and debug diagnostics ===
+
+template <typename T>
+static bool ggml_cuda_try_grow_buffer(
+        T ** buf,
+        size_t * buf_size,
+        size_t required_bytes,
+        int device,
+        const char * name) {
+    if (required_bytes <= *buf_size) {
+        return true;
+    }
+
+    size_t free_vram = 0;
+    size_t total_vram = 0;
+    const cudaError_t mem_info_err = cudaMemGetInfo(&free_vram, &total_vram);
+
+    T * new_buf = nullptr;
+    cudaError_t err = cudaMalloc((void **) &new_buf, required_bytes);
+    if (err != cudaSuccess) {
+        if (mem_info_err == cudaSuccess) {
+            fprintf(stderr,
+                "turbo workspace: cudaMalloc failed for %s on device %d: "
+                "requested %.2f MiB, free %.2f MiB / total %.2f MiB, error=%s\n",
+                name, device,
+                required_bytes / 1024.0 / 1024.0,
+                free_vram / 1024.0 / 1024.0,
+                total_vram / 1024.0 / 1024.0,
+                cudaGetErrorString(err));
+        } else {
+            fprintf(stderr,
+                "turbo workspace: cudaMalloc failed for %s on device %d: "
+                "requested %.2f MiB, error=%s\n",
+                name, device,
+                required_bytes / 1024.0 / 1024.0,
+                cudaGetErrorString(err));
+        }
+        return false;
+    }
+
+    if (*buf != nullptr) {
+        CUDA_CHECK(cudaFree(*buf));
+    }
+
+    *buf = new_buf;
+    *buf_size = required_bytes;
+    return true;
+}
+
+static bool ggml_cuda_turbo_debug_enabled() {
+#ifndef NDEBUG
+    return true;
+#else
+    static const bool enabled = getenv("GGML_CUDA_TURBO_DEBUG") != nullptr;
+    return enabled;
+#endif
+}
+
+static void ggml_cuda_turbo_check_last_error(const char * where) {
+    if (!ggml_cuda_turbo_debug_enabled()) {
+        return;
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "turbo FA debug: CUDA error after %s: %s\n", where, cudaGetErrorString(err));
+    }
+}
+
+static void ggml_cuda_turbo_log_shapes(const char * phase,
+                                        const ggml_tensor * Q,
+                                        const ggml_tensor * K,
+                                        const ggml_tensor * V) {
+    if (!ggml_cuda_turbo_debug_enabled()) {
+        return;
+    }
+    fprintf(stderr,
+        "turbo FA debug: %s Q type=%s ne=[%ld,%ld,%ld,%ld] "
+        "K type=%s ne=[%ld,%ld,%ld,%ld] "
+        "V type=%s ne=[%ld,%ld,%ld,%ld]\n",
+        phase,
+        ggml_type_name(Q->type), (long)Q->ne[0], (long)Q->ne[1], (long)Q->ne[2], (long)Q->ne[3],
+        ggml_type_name(K->type), (long)K->ne[0], (long)K->ne[1], (long)K->ne[2], (long)K->ne[3],
+        ggml_type_name(V->type), (long)V->ne[0], (long)V->ne[1], (long)V->ne[2], (long)V->ne[3]);
+}
+
 // === FWHT rotation kernels for pre-rotate-queries approach ===
 // Forward rotation on Q before attention (both prefill and decode paths).
 // One block per 128-element group, 128 threads per block.
@@ -905,14 +991,14 @@ static __global__ void k_turbo_fwht_forward(
     val = val * inv_sqrt_128 * s2[threadIdx.x];
     dst[offset + threadIdx.x] = val;
 
-    // Q² calibration: accumulate per-position squared values
+    // QÂ² calibration: accumulate per-position squared values
     if (d_q_calibrate_fattn) {
         atomicAdd_double(&d_q_channel_sq_fattn[threadIdx.x], (double)(val * val));
         if (threadIdx.x == 0) atomicAdd(&d_q_channel_count_fattn, 1);
     }
 }
 
-static void ggml_cuda_turbo_prefill_attend(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+static bool ggml_cuda_turbo_prefill_attend(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     load_tcq_decode_alpha(ctx.device);
     cudaStream_t stream = ctx.stream();
     const ggml_tensor * K = dst->src[1];
@@ -924,20 +1010,46 @@ static void ggml_cuda_turbo_prefill_attend(ggml_backend_cuda_context & ctx, ggml
     int device;
     CUDA_CHECK(cudaGetDevice(&device));
 
+    // Reserve all required workspace before any kernel launches or dst->src[] mutations.
+    size_t k_size = 0;
+    if (turbo_k) {
+        const ggml_tensor * k_root = K;
+        while (k_root->view_src) k_root = k_root->view_src;
+        k_size = (size_t)k_root->ne[0] * k_root->ne[1] * k_root->ne[2] * sizeof(half);
+    }
+    size_t v_size = 0;
+    if (turbo_v) {
+        const ggml_tensor * v_root = V;
+        while (v_root->view_src) v_root = v_root->view_src;
+        v_size = (size_t)v_root->ne[0] * v_root->ne[1] * v_root->ne[2] * sizeof(half);
+    }
+    size_t q_size = 0;
+    const ggml_tensor * Q = dst->src[0];
+    const bool turbo_k_needs_rotation = turbo_k && K->type != GGML_TYPE_TURBO4_0 && Q->ne[0] % 128 == 0;
+    if (turbo_k_needs_rotation) {
+        q_size = ggml_nelements(Q) * sizeof(float);
+    }
+    if (turbo_k) {
+        if (!ggml_cuda_try_grow_buffer(&kv_dequant_k_buf[device], &kv_dequant_k_buf_size[device], k_size, device, "prefill K dequant")) {
+            return false;
+        }
+    }
+    if (turbo_v) {
+        if (!ggml_cuda_try_grow_buffer(&kv_dequant_v_buf[device], &kv_dequant_v_buf_size[device], v_size, device, "prefill V dequant")) {
+            return false;
+        }
+    }
+    if (turbo_k_needs_rotation) {
+        if (!ggml_cuda_try_grow_buffer(&q_rot_buf[device], &q_rot_buf_size[device], q_size, device, "prefill Q rotation")) {
+            return false;
+        }
+    }
+
     half * k_fp16 = nullptr;
     half * v_fp16 = nullptr;
 
     // Allocate and dequant K to fp16 (turbo2, turbo3, or turbo4)
     if (turbo_k) {
-        // Size for full cache (kv_size from root) so we never realloc mid-session.
-        const ggml_tensor * k_root = K;
-        while (k_root->view_src) k_root = k_root->view_src;
-        const size_t k_size = (size_t)k_root->ne[0] * k_root->ne[1] * k_root->ne[2] * sizeof(half);
-        if (k_size > kv_dequant_k_buf_size[device]) {
-            if (kv_dequant_k_buf[device]) CUDA_CHECK(cudaFree(kv_dequant_k_buf[device]));
-            CUDA_CHECK(cudaMalloc(&kv_dequant_k_buf[device], k_size));
-            kv_dequant_k_buf_size[device] = k_size;
-        }
         k_fp16 = kv_dequant_k_buf[device];
         dim3 grid_k(K->ne[1], K->ne[2], K->ne[3]);
         if (K->type == GGML_TYPE_TURBO2_0) {
@@ -991,23 +1103,15 @@ static void ggml_cuda_turbo_prefill_attend(ggml_backend_cuda_context & ctx, ggml
             k_turbo2_tcq_dequant_f16<<<grid_k, K->ne[0], 0, stream>>>(
                 (const char *)K->data, k_fp16, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3], d_tcq_decode_alpha_k);
         } else {
-            // turbo4 K: inverse FWHT dequant → produces K in original domain (no Q rotation needed)
+            // turbo4 K: inverse FWHT dequant â†’ produces K in original domain (no Q rotation needed)
             k_turbo4_dequant_f16_inv_fwht<<<grid_k, 128, 0, stream>>>(
                 (const char *)K->data, k_fp16, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3]);
         }
+        ggml_cuda_turbo_check_last_error("prefill K dequant");
     }
 
-    // Allocate and dequant V to fp16 (turbo2, turbo3, or turbo4)
+    // Dequant V to fp16 (turbo2, turbo3, or turbo4)
     if (turbo_v) {
-        // Size for full cache (kv_size from root) so we never realloc mid-session.
-        const ggml_tensor * v_root = V;
-        while (v_root->view_src) v_root = v_root->view_src;
-        const size_t v_size = (size_t)v_root->ne[0] * v_root->ne[1] * v_root->ne[2] * sizeof(half);
-        if (v_size > kv_dequant_v_buf_size[device]) {
-            if (kv_dequant_v_buf[device]) CUDA_CHECK(cudaFree(kv_dequant_v_buf[device]));
-            CUDA_CHECK(cudaMalloc(&kv_dequant_v_buf[device], v_size));
-            kv_dequant_v_buf_size[device] = v_size;
-        }
         v_fp16 = kv_dequant_v_buf[device];
         dim3 grid_v(V->ne[1], V->ne[2], V->ne[3]);
         if (V->type == GGML_TYPE_TURBO2_0) {
@@ -1064,6 +1168,7 @@ static void ggml_cuda_turbo_prefill_attend(ggml_backend_cuda_context & ctx, ggml
             k_turbo4_dequant_f16<<<grid_v, V->ne[0], 0, stream>>>(
                 (const char *)V->data, v_fp16, V->ne[0], V->ne[1], V->ne[2], V->nb[1], V->nb[2], V->nb[3]);
         }
+        ggml_cuda_turbo_check_last_error("prefill V dequant");
     }
 
     // Create fp16 tensor copies on stack
@@ -1088,21 +1193,15 @@ static void ggml_cuda_turbo_prefill_attend(ggml_backend_cuda_context & ctx, ggml
         V_f16.nb[3] = V->ne[0] * V->ne[1] * V->ne[2] * sizeof(half);
     }
 
-    // Rotate Q for turbo pre-rotate-queries (only when K is in rotated space)
+// Rotate Q for turbo pre-rotate-queries (only when K is in rotated space)
     // turbo4 K is dequanted via inverse FWHT → original domain, so Q stays unrotated
-    const ggml_tensor * Q = dst->src[0];
     float * q_rotated = nullptr;
-    if (turbo_k && K->type != GGML_TYPE_TURBO4_0 && Q->ne[0] % 128 == 0) {
-        const size_t q_size = ggml_nelements(Q) * sizeof(float);
-        if (q_size > q_rot_buf_size[device]) {
-            if (q_rot_buf[device]) CUDA_CHECK(cudaFree(q_rot_buf[device]));
-            CUDA_CHECK(cudaMalloc(&q_rot_buf[device], q_size));
-            q_rot_buf_size[device] = q_size;
-        }
+    if (turbo_k_needs_rotation) {
         q_rotated = q_rot_buf[device];
         const int64_t n_q_groups = ggml_nelements(Q) / 128;
         k_turbo_fwht_forward<<<(int)n_q_groups, 128, 0, stream>>>(
             (const float *)Q->data, q_rotated, ggml_nelements(Q));
+        ggml_cuda_turbo_check_last_error("prefill Q rotation");
     }
 
     // Temporarily swap src pointers to fp16 K/V and rotated Q
@@ -1128,6 +1227,7 @@ static void ggml_cuda_turbo_prefill_attend(ggml_backend_cuda_context & ctx, ggml
     dst->src[2] = orig_v;
 
     // K/V fp16 buffers are persistent (grow-only), no free needed
+    return true;
 }
 
 #define FATTN_VEC_CASE(D, type_K, type_V)                                                                        \
@@ -1386,7 +1486,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     // For small batch sizes the vector kernel may be preferable over the kernels optimized for large batch sizes:
 
     // TurboQuant: only the vec kernel has native turbo dequant support.
-    // No FATTN_KQ_STRIDE alignment needed — vec kernel handles arbitrary lengths.
+    // No FATTN_KQ_STRIDE alignment needed â€” vec kernel handles arbitrary lengths.
     if (K->type == GGML_TYPE_TURBO2_0 || V->type == GGML_TYPE_TURBO2_0 ||
         K->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO3_0 ||
         K->type == GGML_TYPE_TURBO4_0 || V->type == GGML_TYPE_TURBO4_0 ||
@@ -1514,8 +1614,8 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     const ggml_tensor * V = dst->src[2];
 
     // Turbo prefill: dequant to fp16 and use tensor core MMA for batched attention.
-    // turbo4 K uses inverse FWHT during dequant — mixes centroids in float32 shmem before
-    // fp16 cast, so precision is fine. turbo2/turbo3 use simple centroid×norm dequant.
+    // turbo4 K uses inverse FWHT during dequant â€” mixes centroids in float32 shmem before
+    // fp16 cast, so precision is fine. turbo2/turbo3 use simple centroidÃ—norm dequant.
     // Set TURBO_PREFILL_VEC=1 to force vec kernel for all turbo types (debug override).
     static const bool turbo_prefill_vec = [] {
         const char * e = getenv("TURBO_PREFILL_VEC");
@@ -1542,298 +1642,351 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
         int device;
         CUDA_CHECK(cudaGetDevice(&device));
 
-        // Pre-rotate Q: turbo4 K stays in WHT-rotated domain (no inv-FWHT), so Q must be rotated.
-        ggml_tensor Q_rot_fused;
-        ggml_tensor * orig_q_fused = nullptr;
+        bool fused_workspace_ok = true;
         if (Q->ne[0] % 128 == 0) {
             const size_t q_size = ggml_nelements(Q) * sizeof(float);
-            if (q_size > q_rot_buf_size[device]) {
-                if (q_rot_buf[device]) CUDA_CHECK(cudaFree(q_rot_buf[device]));
-                CUDA_CHECK(cudaMalloc(&q_rot_buf[device], q_size));
-                q_rot_buf_size[device] = q_size;
+            fused_workspace_ok = ggml_cuda_try_grow_buffer(
+                &q_rot_buf[device],
+                &q_rot_buf_size[device],
+                q_size,
+                device,
+                "fused Q rotation");
+        }
+
+        if (fused_workspace_ok) {
+            ggml_tensor Q_rot_fused;
+            ggml_tensor * orig_q_fused = nullptr;
+            if (Q->ne[0] % 128 == 0) {
+                const int64_t n_q_groups = ggml_nelements(Q) / 128;
+                k_turbo_fwht_forward<<<(int)n_q_groups, 128, 0, stream>>>(
+                    (const float *)Q->data, q_rot_buf[device], ggml_nelements(Q));
+                Q_rot_fused = *Q;
+                Q_rot_fused.data = q_rot_buf[device];
+                orig_q_fused = dst->src[0];
+                dst->src[0] = &Q_rot_fused;
             }
-            const int64_t n_q_groups = ggml_nelements(Q) / 128;
-            k_turbo_fwht_forward<<<(int)n_q_groups, 128, 0, stream>>>(
-                (const float *)Q->data, q_rot_buf[device], ggml_nelements(Q));
-            Q_rot_fused = *Q;
-            Q_rot_fused.data = q_rot_buf[device];
-            orig_q_fused = dst->src[0];
-            dst->src[0] = &Q_rot_fused;
-        }
 
-        if (Q->ne[0] == 128) {
-            ggml_cuda_flash_attn_ext_mma_turbo_switch_ncols2<128, 128, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0>(ctx, dst);
-        } else {
-            ggml_cuda_flash_attn_ext_mma_turbo_switch_ncols2<256, 256, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0>(ctx, dst);
-        }
+            if (Q->ne[0] == 128) {
+                ggml_cuda_flash_attn_ext_mma_turbo_switch_ncols2<128, 128, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0>(ctx, dst);
+            } else {
+                ggml_cuda_flash_attn_ext_mma_turbo_switch_ncols2<256, 256, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0>(ctx, dst);
+            }
 
-        if (orig_q_fused) dst->src[0] = orig_q_fused;
-        return;
+            if (orig_q_fused) dst->src[0] = orig_q_fused;
+            return;
+        }
+        // fused workspace allocation failed â€” fall through to dequant/native path
     }
 
     if (turbo_kv && !turbo_prefill_vec && Q->ne[1] > 1 && Q->ne[0] <= 256 && turing_mma_available(ggml_cuda_info().devices[ggml_cuda_get_device()].cc)) {
         // Prefill path: turbo4 K uses inverse FWHT dequant (original domain, no Q rotation),
         // turbo2/3 K uses simple dequant (rotated domain, Q pre-rotated). V un-rotation at graph level.
-        ggml_cuda_turbo_prefill_attend(ctx, dst);
-    } else {
-        load_tcq_decode_alpha(ctx.device);
-
-        // Update VEC __constant__ alpha for context-adaptive mode
-        if (d_tcq_decode_alpha_v_static == 0.0f &&
-            (V->type == GGML_TYPE_TURBO3_TCQ || V->type == GGML_TYPE_TURBO2_TCQ)) {
-            float alpha = tcq_compute_alpha_v(V->type, V->ne[1]);
-            cudaMemcpyToSymbol(d_tcq_decode_alpha_v_fattn, &alpha, sizeof(float));
+        const bool did_turbo_prefill = ggml_cuda_turbo_prefill_attend(ctx, dst);
+        if (did_turbo_prefill) {
+            return;
         }
+        // Prefill workspace allocation failed â€” fall through to dequant/native path
+    }
 
-        // Load runtime codebooks for TCQ types (needed by both dequant and native VEC paths)
-        if (K->type == GGML_TYPE_TURBO3_TCQ || V->type == GGML_TYPE_TURBO3_TCQ) {
-            static bool tcq3_cb_loaded[GGML_CUDA_MAX_DEVICES] = {};
-            if (!tcq3_cb_loaded[ctx.device]) {
-                tcq3_cb_loaded[ctx.device] = true;
-                const char *cb_path = getenv("TURBO_TCQ_CB");
-                if (cb_path) {
-                    float cb[512];
-                    FILE *f = fopen(cb_path, "rb");
-                    if (f && fread(cb, sizeof(float), 512, f) == 512) {
-                        fclose(f);
-                        cudaMemcpyToSymbol(d_turbo3_tcq_codebook_fattn, cb, 512*sizeof(float));
-                        fprintf(stderr, "TCQ decode: loaded 3-bit codebook from %s (device %d)\n", cb_path, ctx.device);
-                    } else {
-                        if (f) fclose(f);
-                        fprintf(stderr, "TCQ decode: FAILED to load 3-bit codebook from %s\n", cb_path);
-                    }
-                }
-            }
-        }
-        if (K->type == GGML_TYPE_TURBO2_TCQ || V->type == GGML_TYPE_TURBO2_TCQ) {
-            static bool tcq2_cb_loaded[GGML_CUDA_MAX_DEVICES] = {};
-            if (!tcq2_cb_loaded[ctx.device]) {
-                tcq2_cb_loaded[ctx.device] = true;
-                const char *cb_path = getenv("TURBO_TCQ_CB2");
-                if (cb_path) {
-                    float cb[256];
-                    FILE *f = fopen(cb_path, "rb");
-                    if (f && fread(cb, sizeof(float), 256, f) == 256) {
-                        fclose(f);
-                        cudaMemcpyToSymbol(d_turbo2_tcq_codebook_fattn, cb, 256*sizeof(float));
-                        fprintf(stderr, "TCQ decode: loaded 2-bit codebook from %s (device %d)\n", cb_path, ctx.device);
-                    } else {
-                        if (f) fclose(f);
-                        fprintf(stderr, "TCQ decode: FAILED to load 2-bit codebook from %s\n", cb_path);
-                    }
+    load_tcq_decode_alpha(ctx.device);
+
+    // Update VEC __constant__ alpha for context-adaptive mode
+    if (d_tcq_decode_alpha_v_static == 0.0f &&
+        (V->type == GGML_TYPE_TURBO3_TCQ || V->type == GGML_TYPE_TURBO2_TCQ)) {
+        float alpha = tcq_compute_alpha_v(V->type, V->ne[1]);
+        cudaMemcpyToSymbol(d_tcq_decode_alpha_v_fattn, &alpha, sizeof(float));
+    }
+
+    // Load runtime codebooks for TCQ types (needed by both dequant and native VEC paths)
+    if (K->type == GGML_TYPE_TURBO3_TCQ || V->type == GGML_TYPE_TURBO3_TCQ) {
+        static bool tcq3_cb_loaded[GGML_CUDA_MAX_DEVICES] = {};
+        if (!tcq3_cb_loaded[ctx.device]) {
+            tcq3_cb_loaded[ctx.device] = true;
+            const char *cb_path = getenv("TURBO_TCQ_CB");
+            if (cb_path) {
+                float cb[512];
+                FILE *f = fopen(cb_path, "rb");
+                if (f && fread(cb, sizeof(float), 512, f) == 512) {
+                    fclose(f);
+                    cudaMemcpyToSymbol(d_turbo3_tcq_codebook_fattn, cb, 512*sizeof(float));
+                    fprintf(stderr, "TCQ decode: loaded 3-bit codebook from %s (device %d)\n", cb_path, ctx.device);
+                } else {
+                    if (f) fclose(f);
+                    fprintf(stderr, "TCQ decode: FAILED to load 3-bit codebook from %s\n", cb_path);
                 }
             }
         }
-
-        cudaStream_t stream = ctx.stream();
-
-        // Dequant turbo K/V to fp16 for decode: MMA tensor cores on fp16 beat VEC scalar
-        // on turbo bits for dense models. Bandwidth savings from turbo's 3/16 footprint are
-        // negligible relative to FFN compute (~1% slower native on Qwen3.5-27B, 3090).
-        // Set GGML_TURBO_DECODE_NATIVE=1 to force native VEC path (may help bandwidth-limited configs).
-        static const bool turbo_decode_native = (getenv("GGML_TURBO_DECODE_NATIVE") != nullptr);
-        // Dequant turbo K/V to fp16 for D<=256 (any K/V combo), or D=512 only when BOTH
-        // K and V are turbo (Gemma 4 ISWA global layers with K=V — Bug A2). Mixed q8_0+turbo
-        // at D=512 stays on native VEC path because post-dequant q8_0 K + f16 V has no
-        // working VEC template at D=512.
-        const bool turbo_k_only = K->type == GGML_TYPE_TURBO2_0 || K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO4_0 || K->type == GGML_TYPE_TURBO3_TCQ || K->type == GGML_TYPE_TURBO2_TCQ;
-        const bool turbo_v_only = V->type == GGML_TYPE_TURBO2_0 || V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0 || V->type == GGML_TYPE_TURBO3_TCQ || V->type == GGML_TYPE_TURBO2_TCQ;
-        // Mixed f16/q8_0 + turbo at D=512: dequant K (and turbo V) to f16 so FA dispatches as
-        // F16/F16 D=512 (which exists). Without this, the native VEC templates needed are
-        // either missing (F16↔turbo) or have buggy SASS on sm_120 PTX-JIT (Q8_0↔turbo4 etc).
-        const bool k_is_f16_q8_or_turbo = (K->type == GGML_TYPE_F16) || (K->type == GGML_TYPE_Q8_0) || turbo_k_only;
-        const bool v_is_f16_q8_or_turbo = (V->type == GGML_TYPE_F16) || (V->type == GGML_TYPE_Q8_0) || turbo_v_only;
-        const bool both_dequantable_512 = k_is_f16_q8_or_turbo && v_is_f16_q8_or_turbo;
-        const bool do_decode_dequant = !turbo_decode_native && turbo_kv && (Q->ne[0] <= 256 || (Q->ne[0] <= 512 && both_dequantable_512));
-
-        half * k_fp16_dec = nullptr;
-        half * v_fp16_dec = nullptr;
-        ggml_tensor K_f16_dec, V_f16_dec;
-        ggml_tensor * orig_k_decode = nullptr;
-        ggml_tensor * orig_v_decode = nullptr;
-
-        int device_dec;
-        CUDA_CHECK(cudaGetDevice(&device_dec));
-
-        if (do_decode_dequant) {
-            const bool k_needs_dequant = turbo_k_only || (K->type == GGML_TYPE_Q8_0 && Q->ne[0] > 256);
-            const bool v_needs_dequant = turbo_v_only || (V->type == GGML_TYPE_Q8_0 && Q->ne[0] > 256);
-            if (k_needs_dequant) {
-                // Size the dequant buffer for the FULL cache (kv_size from the underlying root
-                // tensor), not just the current n_kv. This prevents per-token reallocations as
-                // the cache fills, which would invalidate any in-flight CUDA graph capture
-                // pointing at the old device pointer (defensive against PR #21635-class bugs).
-                // The first call sizes the buffer for the worst-case cache; subsequent calls
-                // (including layers with smaller caches) reuse the same allocation.
-                const ggml_tensor * k_root = K;
-                while (k_root->view_src) k_root = k_root->view_src;
-                const size_t k_max_bytes = (size_t)k_root->ne[0] * k_root->ne[1] * k_root->ne[2] * sizeof(half);
-                if (k_max_bytes > kv_dequant_k_buf_size[device_dec]) {
-                    if (kv_dequant_k_buf[device_dec]) CUDA_CHECK(cudaFree(kv_dequant_k_buf[device_dec]));
-                    CUDA_CHECK(cudaMalloc(&kv_dequant_k_buf[device_dec], k_max_bytes));
-                    kv_dequant_k_buf_size[device_dec] = k_max_bytes;
+    }
+    if (K->type == GGML_TYPE_TURBO2_TCQ || V->type == GGML_TYPE_TURBO2_TCQ) {
+        static bool tcq2_cb_loaded[GGML_CUDA_MAX_DEVICES] = {};
+        if (!tcq2_cb_loaded[ctx.device]) {
+            tcq2_cb_loaded[ctx.device] = true;
+            const char *cb_path = getenv("TURBO_TCQ_CB2");
+            if (cb_path) {
+                float cb[256];
+                FILE *f = fopen(cb_path, "rb");
+                if (f && fread(cb, sizeof(float), 256, f) == 256) {
+                    fclose(f);
+                    cudaMemcpyToSymbol(d_turbo2_tcq_codebook_fattn, cb, 256*sizeof(float));
+                    fprintf(stderr, "TCQ decode: loaded 2-bit codebook from %s (device %d)\n", cb_path, ctx.device);
+                } else {
+                    if (f) fclose(f);
+                    fprintf(stderr, "TCQ decode: FAILED to load 2-bit codebook from %s\n", cb_path);
                 }
-                k_fp16_dec = kv_dequant_k_buf[device_dec];
-                // K dequant to fp16 in ORIGINAL (unrotated) domain via inverse FWHT.
-                // All turbo K types use inv-FWHT kernels so K matches native f16/q8_0 layout
-                // and Q stays unrotated. This mirrors the prefill path's encode→decode chain
-                // and is the only path that works on Gemma 4 ISWA + K=V global layers.
-                //
-                // Bug #31 exception: K=turbo2 inv-FWHT decode produces correct values for V in
-                // {turbo2, *_tcq} but a (still-undiagnosed) divergence with V in {turbo3, turbo4,
-                // q8_0, f16} on Gemma 4 26B-A4B (degenerate single-token output, attention scores
-                // collapse). The PREFILL path uses the rotated-domain kernel + Q rotation for
-                // turbo2 K and works for every V type. Mirror that here for the failing V types.
-                const bool k_t2_use_rotated = (K->type == GGML_TYPE_TURBO2_0) &&
-                    (V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0 ||
-                     V->type == GGML_TYPE_Q8_0    || V->type == GGML_TYPE_F16);
-                const bool k_t3_use_rotated = (K->type == GGML_TYPE_TURBO3_0) &&
-                    (V->type == GGML_TYPE_TURBO2_0);
-                dim3 grid_k(K->ne[1], K->ne[2], K->ne[3]);
-                if (K->type == GGML_TYPE_TURBO2_0 && k_t2_use_rotated) {
-                    // Rotated-domain dequant: K stays in WHT-rotated space; Q is pre-rotated below.
-                    k_turbo2_dequant_f16<<<grid_k, K->ne[0], 0, stream>>>(
-                        (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3]);
-                } else if (K->type == GGML_TYPE_TURBO2_0) {
-                    k_turbo2_dequant_f16_inv_fwht<<<grid_k, 128, 0, stream>>>(
-                        (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3]);
-                } else if (K->type == GGML_TYPE_TURBO3_0 && k_t3_use_rotated) {
-                    // Rotated-domain dequant for K=t3 + V=t2 (same Bug #31 pattern, V side).
-                    k_turbo3_dequant_f16<<<grid_k, K->ne[0], 0, stream>>>(
-                        (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3]);
-                } else if (K->type == GGML_TYPE_TURBO3_0) {
-                    k_turbo3_dequant_f16_inv_fwht<<<grid_k, 128, 0, stream>>>(
-                        (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3]);
-                } else if (K->type == GGML_TYPE_TURBO4_0) {
-                    k_turbo4_dequant_f16_inv_fwht<<<grid_k, 128, 0, stream>>>(
-                        (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3]);
-                } else if (K->type == GGML_TYPE_TURBO3_TCQ) {
-                    k_turbo3_tcq_dequant_f16_inv_fwht<<<grid_k, 128, 0, stream>>>(
-                        (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3], d_tcq_decode_alpha_k);
-                } else if (K->type == GGML_TYPE_TURBO2_TCQ) {
-                    k_turbo2_tcq_dequant_f16_inv_fwht<<<grid_k, 128, 0, stream>>>(
-                        (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3], d_tcq_decode_alpha_k);
-                } else if (K->type == GGML_TYPE_Q8_0) {
-                    // Q8_0 K dequant: only fires at D=512 when V is turbo (no F16/Q8_0 D=512
-                    // template, and (Q8_0, TURBO4_0) D=512 has buggy SASS on sm_120 PTX-JIT).
-                    // Output goes into TKHE layout matching V_f16_dec → dispatches as F16/F16 D=512.
-                    k_q8_0_dequant_f16_tkhe<<<grid_k, K->ne[0], 0, stream>>>(
-                        (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3]);
-                }
-                K_f16_dec = *K;
-                K_f16_dec.type = GGML_TYPE_F16;
-                K_f16_dec.data = k_fp16_dec;
-                K_f16_dec.nb[0] = sizeof(half);
-                K_f16_dec.nb[1] = K->ne[0] * K->ne[2] * sizeof(half);  // row stride: head_dim * n_head_kv (matches native cache)
-                K_f16_dec.nb[2] = K->ne[0] * sizeof(half);             // head stride: head_dim (matches native cache)
-                K_f16_dec.nb[3] = K->ne[0] * K->ne[1] * K->ne[2] * sizeof(half);
-                orig_k_decode = dst->src[1];
-                dst->src[1] = &K_f16_dec;
-            }
-            if (v_needs_dequant) {
-                // Same kv_size-based sizing as K above — see comment there.
-                const ggml_tensor * v_root = V;
-                while (v_root->view_src) v_root = v_root->view_src;
-                const size_t v_max_bytes = (size_t)v_root->ne[0] * v_root->ne[1] * v_root->ne[2] * sizeof(half);
-                if (v_max_bytes > kv_dequant_v_buf_size[device_dec]) {
-                    if (kv_dequant_v_buf[device_dec]) CUDA_CHECK(cudaFree(kv_dequant_v_buf[device_dec]));
-                    CUDA_CHECK(cudaMalloc(&kv_dequant_v_buf[device_dec], v_max_bytes));
-                    kv_dequant_v_buf_size[device_dec] = v_max_bytes;
-                }
-                v_fp16_dec = kv_dequant_v_buf[device_dec];
-                // V dequant to fp16. All turbo V stays in rotated domain — the graph-level
-                // ggml_turbo_wht inverse op (added in build_attn) un-rotates the attention output.
-                dim3 grid_v(V->ne[1], V->ne[2], V->ne[3]);
-                if (V->type == GGML_TYPE_TURBO2_0) {
-                    k_turbo2_dequant_f16<<<grid_v, V->ne[0], 0, stream>>>(
-                        (const char *)V->data, v_fp16_dec, V->ne[0], V->ne[1], V->ne[2], V->nb[1], V->nb[2], V->nb[3]);
-                } else if (V->type == GGML_TYPE_TURBO3_TCQ) {
-                    k_turbo3_tcq_dequant_f16<<<grid_v, V->ne[0], 0, stream>>>(
-                        (const char *)V->data, v_fp16_dec, V->ne[0], V->ne[1], V->ne[2], V->nb[1], V->nb[2], V->nb[3], tcq_compute_alpha_v(V->type, V->ne[1]));
-                } else if (V->type == GGML_TYPE_TURBO2_TCQ) {
-                    k_turbo2_tcq_dequant_f16<<<grid_v, V->ne[0], 0, stream>>>(
-                        (const char *)V->data, v_fp16_dec, V->ne[0], V->ne[1], V->ne[2], V->nb[1], V->nb[2], V->nb[3], tcq_compute_alpha_v(V->type, V->ne[1]));
-                } else if (V->type == GGML_TYPE_TURBO4_0) {
-                    k_turbo4_dequant_f16<<<grid_v, V->ne[0], 0, stream>>>(
-                        (const char *)V->data, v_fp16_dec, V->ne[0], V->ne[1], V->ne[2], V->nb[1], V->nb[2], V->nb[3]);
-                } else if (V->type == GGML_TYPE_TURBO3_0) {
-                    k_turbo3_dequant_f16<<<grid_v, V->ne[0], 0, stream>>>(
-                        (const char *)V->data, v_fp16_dec, V->ne[0], V->ne[1], V->ne[2], V->nb[1], V->nb[2], V->nb[3]);
-                } else if (V->type == GGML_TYPE_Q8_0) {
-                    // Q8_0 V dequant: only fires at D=512 when K is turbo (mirror of K=Q8_0 path).
-                    k_q8_0_dequant_f16_tkhe<<<grid_v, V->ne[0], 0, stream>>>(
-                        (const char *)V->data, v_fp16_dec, V->ne[0], V->ne[1], V->ne[2], V->nb[1], V->nb[2], V->nb[3]);
-                }
-                V_f16_dec = *V;
-                V_f16_dec.type = GGML_TYPE_F16;
-                V_f16_dec.data = v_fp16_dec;
-                V_f16_dec.nb[0] = sizeof(half);
-                V_f16_dec.nb[1] = V->ne[0] * V->ne[2] * sizeof(half);  // row stride: head_dim * n_head_kv (matches native cache)
-                V_f16_dec.nb[2] = V->ne[0] * sizeof(half);             // head stride: head_dim (matches native cache)
-                V_f16_dec.nb[3] = V->ne[0] * V->ne[1] * V->ne[2] * sizeof(half);
-                orig_v_decode = dst->src[2];
-                dst->src[2] = &V_f16_dec;
-                // Bug A1: nvcc 13 on sm_120a reorders these V_f16_dec.nb[*] stores past the FA
-                // dispatcher → stale strides → <unused49> garbage. signal_fence is a pure
-                // host-compiler barrier (zero machine instructions).
-                std::atomic_signal_fence(std::memory_order_seq_cst);
             }
         }
+    }
 
-        // Pre-rotate Q for turbo K stored in rotated domain.
-        // When do_decode_dequant fires, all turbo K types are dequanted via inv-FWHT into
-        // ORIGINAL domain → Q stays unrotated. When decode dequant is skipped (D>256 or
-        // GGML_TURBO_DECODE_NATIVE), turbo K is consumed by the native vec turbo dot product,
-        // which expects a pre-rotated Q — so rotate Q in that case.
-        ggml_tensor Q_rot_decode;
-        ggml_tensor * orig_q_decode = nullptr;
-        const bool turbo_k_any = (K->type == GGML_TYPE_TURBO2_0 || K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO4_0 || K->type == GGML_TYPE_TURBO3_TCQ || K->type == GGML_TYPE_TURBO2_TCQ);
-        // Bug #31 exception: when K=turbo2/turbo3 dequant fell back to the rotated kernel (see K
-        // dispatch above), K is in WHT-rotated space, not original space, so Q must be pre-rotated.
-        const bool k_uses_rotated_path = do_decode_dequant && (
-            ((K->type == GGML_TYPE_TURBO2_0) &&
-             (V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0 ||
-              V->type == GGML_TYPE_Q8_0    || V->type == GGML_TYPE_F16)) ||
-            ((K->type == GGML_TYPE_TURBO3_0) && (V->type == GGML_TYPE_TURBO2_0)));
-        const bool turbo_k_in_orig_domain = do_decode_dequant && turbo_k_any && !k_uses_rotated_path;
-        if (turbo_k_any && !turbo_k_in_orig_domain && Q->ne[0] % 128 == 0) {
-            const size_t q_size = ggml_nelements(Q) * sizeof(float);
-            if (q_size > q_rot_buf_size[device_dec]) {
-                if (q_rot_buf[device_dec]) CUDA_CHECK(cudaFree(q_rot_buf[device_dec]));
-                CUDA_CHECK(cudaMalloc(&q_rot_buf[device_dec], q_size));
-                q_rot_buf_size[device_dec] = q_size;
+    cudaStream_t stream = ctx.stream();
+
+    // Debug: log shapes at entry to decode/common path
+    ggml_cuda_turbo_log_shapes("decode", Q, K, V);
+
+    // Dequant turbo K/V to fp16 for decode: MMA tensor cores on fp16 beat VEC scalar
+    // on turbo bits for dense models. Bandwidth savings from turbo's 3/16 footprint are
+    // negligible relative to FFN compute (~1% slower native on Qwen3.5-27B, 3090).
+    // Set GGML_TURBO_DECODE_NATIVE=1 to force native VEC path (may help bandwidth-limited configs).
+    static const bool turbo_decode_native = (getenv("GGML_TURBO_DECODE_NATIVE") != nullptr);
+    // Dequant turbo K/V to fp16 for D<=256 (any K/V combo), or D=512 only when BOTH
+    // K and V are turbo (Gemma 4 ISWA global layers with K=V â€” Bug A2). Mixed q8_0+turbo
+    // at D=512 stays on native VEC path because post-dequant q8_0 K + f16 V has no
+    // working VEC template at D=512.
+    const bool turbo_k_only = K->type == GGML_TYPE_TURBO2_0 || K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO4_0 || K->type == GGML_TYPE_TURBO3_TCQ || K->type == GGML_TYPE_TURBO2_TCQ;
+    const bool turbo_v_only = V->type == GGML_TYPE_TURBO2_0 || V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0 || V->type == GGML_TYPE_TURBO3_TCQ || V->type == GGML_TYPE_TURBO2_TCQ;
+    // Mixed f16/q8_0 + turbo at D=512: dequant K (and turbo V) to f16 so FA dispatches as
+    // F16/F16 D=512 (which exists). Without this, the native VEC templates needed are
+    // either missing (F16â†”turbo) or have buggy SASS on sm_120 PTX-JIT (Q8_0â†”turbo4 etc).
+    const bool k_is_f16_q8_or_turbo = (K->type == GGML_TYPE_F16) || (K->type == GGML_TYPE_Q8_0) || turbo_k_only;
+    const bool v_is_f16_q8_or_turbo = (V->type == GGML_TYPE_F16) || (V->type == GGML_TYPE_Q8_0) || turbo_v_only;
+    const bool both_dequantable_512 = k_is_f16_q8_or_turbo && v_is_f16_q8_or_turbo;
+    const bool do_decode_dequant_candidate = !turbo_decode_native && turbo_kv && (Q->ne[0] <= 256 || (Q->ne[0] <= 512 && both_dequantable_512));
+
+    // Bug #31 exception: when K=turbo2/turbo3 dequant fell back to the rotated kernel (see K
+    // dispatch below), K is in WHT-rotated space, not original space, so Q must be pre-rotated.
+    // Compute these before any dst->src[] mutations.
+    const bool k_needs_dequant = turbo_k_only || (K->type == GGML_TYPE_Q8_0 && Q->ne[0] > 256);
+    const bool v_needs_dequant = turbo_v_only || (V->type == GGML_TYPE_Q8_0 && Q->ne[0] > 256);
+    const bool turbo_k_any = (K->type == GGML_TYPE_TURBO2_0 || K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO4_0 || K->type == GGML_TYPE_TURBO3_TCQ || K->type == GGML_TYPE_TURBO2_TCQ);
+    const bool k_t2_use_rotated = (K->type == GGML_TYPE_TURBO2_0) &&
+        (V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0 ||
+         V->type == GGML_TYPE_Q8_0    || V->type == GGML_TYPE_F16);
+    const bool k_t3_use_rotated = (K->type == GGML_TYPE_TURBO3_0) &&
+        (V->type == GGML_TYPE_TURBO2_0);
+    const bool k_uses_rotated_path = do_decode_dequant_candidate && (
+        (k_t2_use_rotated || k_t3_use_rotated));
+    // Q rotation is needed when: (a) dequant path + K in rotated domain, or (b) native path + turbo K (rotated domain)
+    const bool q_needs_rotation_for_dequant = do_decode_dequant_candidate && k_uses_rotated_path && Q->ne[0] % 128 == 0;
+
+    int device_dec;
+    CUDA_CHECK(cudaGetDevice(&device_dec));
+
+    // === Phase 1: Reserve ALL required workspace before any kernel launches or
+    //     dst->src[] mutations. This prevents half-entered states where K is
+    //     dequanted but V is not, or Q rotation buffer is missing. ===
+
+    bool can_dequant = do_decode_dequant_candidate;
+
+    size_t k_max_bytes = 0;
+    if (can_dequant && k_needs_dequant) {
+        const ggml_tensor * k_root = K;
+        while (k_root->view_src) k_root = k_root->view_src;
+        k_max_bytes = (size_t)k_root->ne[0] * k_root->ne[1] * k_root->ne[2] * sizeof(half);
+    }
+    size_t v_max_bytes = 0;
+    if (can_dequant && v_needs_dequant) {
+        const ggml_tensor * v_root = V;
+        while (v_root->view_src) v_root = v_root->view_src;
+        v_max_bytes = (size_t)v_root->ne[0] * v_root->ne[1] * v_root->ne[2] * sizeof(half);
+    }
+    size_t q_rot_bytes = 0;
+    if (can_dequant && q_needs_rotation_for_dequant) {
+        q_rot_bytes = ggml_nelements(Q) * sizeof(float);
+    }
+
+    if (can_dequant && k_needs_dequant) {
+        if (!ggml_cuda_try_grow_buffer(&kv_dequant_k_buf[device_dec], &kv_dequant_k_buf_size[device_dec],
+                                       k_max_bytes, device_dec, "decode K dequant")) {
+            can_dequant = false;
+        }
+    }
+    if (can_dequant && v_needs_dequant) {
+        if (!ggml_cuda_try_grow_buffer(&kv_dequant_v_buf[device_dec], &kv_dequant_v_buf_size[device_dec],
+                                       v_max_bytes, device_dec, "decode V dequant")) {
+            can_dequant = false;
+        }
+    }
+    if (can_dequant && q_needs_rotation_for_dequant) {
+        if (!ggml_cuda_try_grow_buffer(&q_rot_buf[device_dec], &q_rot_buf_size[device_dec],
+                                       q_rot_bytes, device_dec, "decode Q rotation (dequant)")) {
+            can_dequant = false;
+        }
+    }
+
+    // === Phase 2: If dequant path is viable, launch kernels and mutate dst->src[] ===
+    half * k_fp16_dec = nullptr;
+    half * v_fp16_dec = nullptr;
+    ggml_tensor K_f16_dec, V_f16_dec;
+    ggml_tensor * orig_k_decode = nullptr;
+    ggml_tensor * orig_v_decode = nullptr;
+    ggml_tensor * orig_q_decode = nullptr;
+    ggml_tensor Q_rot_decode;
+
+    const bool do_decode_dequant = can_dequant;
+
+    if (do_decode_dequant) {
+        if (k_needs_dequant) {
+            k_fp16_dec = kv_dequant_k_buf[device_dec];
+            dim3 grid_k(K->ne[1], K->ne[2], K->ne[3]);
+            if (K->type == GGML_TYPE_TURBO2_0 && k_t2_use_rotated) {
+                k_turbo2_dequant_f16<<<grid_k, K->ne[0], 0, stream>>>(
+                    (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3]);
+            } else if (K->type == GGML_TYPE_TURBO2_0) {
+                k_turbo2_dequant_f16_inv_fwht<<<grid_k, 128, 0, stream>>>(
+                    (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3]);
+            } else if (K->type == GGML_TYPE_TURBO3_0 && k_t3_use_rotated) {
+                k_turbo3_dequant_f16<<<grid_k, K->ne[0], 0, stream>>>(
+                    (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3]);
+            } else if (K->type == GGML_TYPE_TURBO3_0) {
+                k_turbo3_dequant_f16_inv_fwht<<<grid_k, 128, 0, stream>>>(
+                    (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3]);
+            } else if (K->type == GGML_TYPE_TURBO4_0) {
+                k_turbo4_dequant_f16_inv_fwht<<<grid_k, 128, 0, stream>>>(
+                    (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3]);
+            } else if (K->type == GGML_TYPE_TURBO3_TCQ) {
+                k_turbo3_tcq_dequant_f16_inv_fwht<<<grid_k, 128, 0, stream>>>(
+                    (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3], d_tcq_decode_alpha_k);
+            } else if (K->type == GGML_TYPE_TURBO2_TCQ) {
+                k_turbo2_tcq_dequant_f16_inv_fwht<<<grid_k, 128, 0, stream>>>(
+                    (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3], d_tcq_decode_alpha_k);
+            } else if (K->type == GGML_TYPE_Q8_0) {
+                k_q8_0_dequant_f16_tkhe<<<grid_k, K->ne[0], 0, stream>>>(
+                    (const char *)K->data, k_fp16_dec, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3]);
             }
+            ggml_cuda_turbo_check_last_error("decode K dequant");
+            K_f16_dec = *K;
+            K_f16_dec.type = GGML_TYPE_F16;
+            K_f16_dec.data = k_fp16_dec;
+            K_f16_dec.nb[0] = sizeof(half);
+            K_f16_dec.nb[1] = K->ne[0] * K->ne[2] * sizeof(half);  // row stride: head_dim * n_head_kv (matches native cache)
+            K_f16_dec.nb[2] = K->ne[0] * sizeof(half);             // head stride: head_dim (matches native cache)
+            K_f16_dec.nb[3] = K->ne[0] * K->ne[1] * K->ne[2] * sizeof(half);
+            orig_k_decode = dst->src[1];
+            dst->src[1] = &K_f16_dec;
+        }
+        if (v_needs_dequant) {
+            v_fp16_dec = kv_dequant_v_buf[device_dec];
+            dim3 grid_v(V->ne[1], V->ne[2], V->ne[3]);
+            if (V->type == GGML_TYPE_TURBO2_0) {
+                k_turbo2_dequant_f16<<<grid_v, V->ne[0], 0, stream>>>(
+                    (const char *)V->data, v_fp16_dec, V->ne[0], V->ne[1], V->ne[2], V->nb[1], V->nb[2], V->nb[3]);
+            } else if (V->type == GGML_TYPE_TURBO3_TCQ) {
+                k_turbo3_tcq_dequant_f16<<<grid_v, V->ne[0], 0, stream>>>(
+                    (const char *)V->data, v_fp16_dec, V->ne[0], V->ne[1], V->ne[2], V->nb[1], V->nb[2], V->nb[3], tcq_compute_alpha_v(V->type, V->ne[1]));
+            } else if (V->type == GGML_TYPE_TURBO2_TCQ) {
+                k_turbo2_tcq_dequant_f16<<<grid_v, V->ne[0], 0, stream>>>(
+                    (const char *)V->data, v_fp16_dec, V->ne[0], V->ne[1], V->ne[2], V->nb[1], V->nb[2], V->nb[3], tcq_compute_alpha_v(V->type, V->ne[1]));
+            } else if (V->type == GGML_TYPE_TURBO4_0) {
+                k_turbo4_dequant_f16<<<grid_v, V->ne[0], 0, stream>>>(
+                    (const char *)V->data, v_fp16_dec, V->ne[0], V->ne[1], V->ne[2], V->nb[1], V->nb[2], V->nb[3]);
+            } else if (V->type == GGML_TYPE_TURBO3_0) {
+                k_turbo3_dequant_f16<<<grid_v, V->ne[0], 0, stream>>>(
+                    (const char *)V->data, v_fp16_dec, V->ne[0], V->ne[1], V->ne[2], V->nb[1], V->nb[2], V->nb[3]);
+            } else if (V->type == GGML_TYPE_Q8_0) {
+                k_q8_0_dequant_f16_tkhe<<<grid_v, V->ne[0], 0, stream>>>(
+                    (const char *)V->data, v_fp16_dec, V->ne[0], V->ne[1], V->ne[2], V->nb[1], V->nb[2], V->nb[3]);
+            }
+            ggml_cuda_turbo_check_last_error("decode V dequant");
+            V_f16_dec = *V;
+            V_f16_dec.type = GGML_TYPE_F16;
+            V_f16_dec.data = v_fp16_dec;
+            V_f16_dec.nb[0] = sizeof(half);
+            V_f16_dec.nb[1] = V->ne[0] * V->ne[2] * sizeof(half);  // row stride: head_dim * n_head_kv (matches native cache)
+            V_f16_dec.nb[2] = V->ne[0] * sizeof(half);             // head stride: head_dim (matches native cache)
+            V_f16_dec.nb[3] = V->ne[0] * V->ne[1] * V->ne[2] * sizeof(half);
+            orig_v_decode = dst->src[2];
+            dst->src[2] = &V_f16_dec;
+            // Bug A1: nvcc 13 on sm_120a reorders these V_f16_dec.nb[*] stores past the FA
+            // dispatcher â†’ stale strides â†’ <unused49> garbage. signal_fence is a pure
+            // host-compiler barrier (zero machine instructions).
+            std::atomic_signal_fence(std::memory_order_seq_cst);
+        }
+
+        // Pre-rotate Q for dequant path when K is in rotated domain
+        if (q_needs_rotation_for_dequant) {
             const int64_t n_q_groups = ggml_nelements(Q) / 128;
             k_turbo_fwht_forward<<<(int)n_q_groups, 128, 0, stream>>>(
                 (const float *)Q->data, q_rot_buf[device_dec], ggml_nelements(Q));
+            ggml_cuda_turbo_check_last_error("decode Q rotation (dequant)");
             Q_rot_decode = *Q;
             Q_rot_decode.data = q_rot_buf[device_dec];
             orig_q_decode = dst->src[0];
             dst->src[0] = &Q_rot_decode;
         }
-
-        switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
-            case BEST_FATTN_KERNEL_NONE:
-                GGML_ABORT("fatal error");
-            case BEST_FATTN_KERNEL_TILE:
-                ggml_cuda_flash_attn_ext_tile(ctx, dst);
-                break;
-            case BEST_FATTN_KERNEL_VEC:
-                ggml_cuda_flash_attn_ext_vec(ctx, dst);
-                break;
-            case BEST_FATTN_KERNEL_WMMA_F16:
-                ggml_cuda_flash_attn_ext_wmma_f16(ctx, dst);
-                break;
-            case BEST_FATTN_KERNEL_MMA_F16:
-                ggml_cuda_flash_attn_ext_mma_f16(ctx, dst);
-                break;
-        }
-
-        if (orig_q_decode) dst->src[0] = orig_q_decode;
-        if (orig_k_decode) dst->src[1] = orig_k_decode;
-        if (orig_v_decode) dst->src[2] = orig_v_decode;
-        // K/V fp16 buffers are persistent (grow-only), no free needed
     }
+
+    // === Native path: Q rotation (only when NOT in dequant path) ===
+    // When do_decode_dequant fires, all turbo K types are dequanted via inv-FWHT into
+    // ORIGINAL domain â†’ Q stays unrotated. When decode dequant is skipped (D>256 or
+    // GGML_TURBO_DECODE_NATIVE), turbo K is consumed by the native vec turbo dot product,
+    // which expects a pre-rotated Q â€” so rotate Q in that case.
+    const bool turbo_k_in_orig_domain = do_decode_dequant && turbo_k_any && !k_uses_rotated_path;
+    if (!do_decode_dequant && turbo_k_any && !turbo_k_in_orig_domain && Q->ne[0] % 128 == 0) {
+        const size_t q_size = ggml_nelements(Q) * sizeof(float);
+        if (!ggml_cuda_try_grow_buffer(&q_rot_buf[device_dec], &q_rot_buf_size[device_dec],
+                                       q_size, device_dec, "decode Q rotation (native)")) {
+            // Native fallback requires Q rotation â€” if workspace is unavailable, it is a
+            // fatal configuration error because the native turbo VEC path reads rotated K
+            // and must have a pre-rotated Q.
+            GGML_ABORT("turbo FA: native VEC fallback selected but Q rotation workspace allocation failed");
+        }
+        const int64_t n_q_groups = ggml_nelements(Q) / 128;
+        k_turbo_fwht_forward<<<(int)n_q_groups, 128, 0, stream>>>(
+            (const float *)Q->data, q_rot_buf[device_dec], ggml_nelements(Q));
+        ggml_cuda_turbo_check_last_error("decode Q rotation (native)");
+        Q_rot_decode = *Q;
+        Q_rot_decode.data = q_rot_buf[device_dec];
+        orig_q_decode = dst->src[0];
+        dst->src[0] = &Q_rot_decode;
+    }
+
+    // === Dispatch ===
+    // When dequant failed and we fell through, restore original src[] and check native VEC.
+    if (!can_dequant && turbo_kv) {
+        // Ensure dst->src[] points to original tensors for fallback check
+        dst->src[0] = const_cast<ggml_tensor *>(Q);
+        dst->src[1] = const_cast<ggml_tensor *>(K);
+        dst->src[2] = const_cast<ggml_tensor *>(V);
+        // Verify original K/V types support a native FA kernel before dispatching
+        const best_fattn_kernel fallback_kernel = ggml_cuda_get_best_fattn_kernel(device_dec, dst);
+        if (fallback_kernel == BEST_FATTN_KERNEL_VEC) {
+            // Native VEC can handle original turbo types directly â€” dispatch below
+        } else {
+            GGML_ABORT("turbo FA: dequant workspace unavailable and no native VEC fallback for K type=%s V type=%s head_dim=%d",
+                        ggml_type_name(K->type), ggml_type_name(V->type), (int)Q->ne[0]);
+        }
+    }
+
+    switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
+        case BEST_FATTN_KERNEL_NONE:
+            GGML_ABORT("fatal error");
+        case BEST_FATTN_KERNEL_TILE:
+            ggml_cuda_flash_attn_ext_tile(ctx, dst);
+            break;
+        case BEST_FATTN_KERNEL_VEC:
+            ggml_cuda_flash_attn_ext_vec(ctx, dst);
+            break;
+        case BEST_FATTN_KERNEL_WMMA_F16:
+            ggml_cuda_flash_attn_ext_wmma_f16(ctx, dst);
+            break;
+        case BEST_FATTN_KERNEL_MMA_F16:
+            ggml_cuda_flash_attn_ext_mma_f16(ctx, dst);
+            break;
+    }
+
+    if (orig_q_decode) dst->src[0] = orig_q_decode;
+    if (orig_k_decode) dst->src[1] = orig_k_decode;
+    if (orig_v_decode) dst->src[2] = orig_v_decode;
+    // K/V fp16 buffers are persistent (grow-only), no free needed
 
     // Output inverse rotation for turbo V types is handled at graph level
     // (ggml_turbo_wht op in llama-graph.cpp) to maintain CUDA graph compatibility.
