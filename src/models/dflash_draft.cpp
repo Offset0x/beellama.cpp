@@ -260,22 +260,27 @@ void llm_graph_input_dflash::set_input(const llama_ubatch * ubatch) {
         const int64_t win_off = (src_real > ctx_len) ? (src_real - ctx_len) : 0;
 
         if (target_hidden && target_hidden->buffer && target_hidden->data && (src_data || src_gpu) && n_copy > 0) {
-            const int64_t n_feat = cross->n_embd;
-            const size_t copy_bytes  = (size_t) n_feat * (size_t) n_copy * sizeof(float);
+            const int64_t n_feat = cross ? cross->n_embd : 0;
             const size_t tensor_bytes = ggml_nbytes(target_hidden);
-            const size_t actual_bytes = std::min(copy_bytes, tensor_bytes);
 
-            if (src_gpu && cross->fn_set_tensor_d2d) {
-                // GPU D2D path
-                const void * gpu_src = (const char *)src_gpu + (size_t)win_off * n_feat * sizeof(float);
-                cross->fn_set_tensor_d2d(target_hidden->data, gpu_src, 0, actual_bytes);
+            if (n_feat != target_hidden->ne[0]) {
+                ggml_backend_tensor_memset(target_hidden, 0, 0, tensor_bytes);
             } else {
-                // CPU H2D path (fallback)
-                const float * src = src_data + win_off * n_feat;
-                ggml_backend_tensor_set(target_hidden, src, 0, actual_bytes);
-            }
-            if (copy_bytes < tensor_bytes) {
-                ggml_backend_tensor_memset(target_hidden, 0, copy_bytes, tensor_bytes - copy_bytes);
+                const size_t copy_bytes  = (size_t) n_feat * (size_t) n_copy * sizeof(float);
+                const size_t actual_bytes = std::min(copy_bytes, tensor_bytes);
+
+                if (src_gpu && cross->fn_set_tensor_d2d) {
+                    // GPU D2D path
+                    const void * gpu_src = (const char *)src_gpu + (size_t)win_off * n_feat * sizeof(float);
+                    cross->fn_set_tensor_d2d(target_hidden->data, gpu_src, 0, actual_bytes);
+                } else {
+                    // CPU H2D path (fallback)
+                    const float * src = src_data + win_off * n_feat;
+                    ggml_backend_tensor_set(target_hidden, src, 0, actual_bytes);
+                }
+                if (copy_bytes < tensor_bytes) {
+                    ggml_backend_tensor_memset(target_hidden, 0, copy_bytes, tensor_bytes - copy_bytes);
+                }
             }
         } else if (target_hidden && target_hidden->buffer && target_hidden->data) {
             ggml_backend_tensor_memset(target_hidden, 0, 0, ggml_nbytes(target_hidden));
@@ -371,14 +376,17 @@ void llm_graph_input_dflash::set_input(const llama_ubatch * ubatch) {
             slot_win_off[s] = (nr > per_slot_ctx) ? (nr - per_slot_ctx) : 0;
         }
 
-        if (target_hidden && n_feat > 0) {
+        if (target_hidden && target_hidden->buffer && target_hidden->data && n_feat > 0) {
             ggml_backend_tensor_memset(target_hidden, 0, 0, ggml_nbytes(target_hidden));
-            for (int s = 0; s < n_seqs; s++) {
-                if (!slot_info[s].data || slot_n_copy[s] <= 0) { continue; }
-                const float * src = slot_info[s].data + slot_win_off[s] * n_feat;
-                const size_t copy_bytes = n_feat * (size_t) slot_n_copy[s] * sizeof(float);
-                const size_t dst_offset = (size_t) s * (size_t) per_slot_ctx * n_feat * sizeof(float);
-                ggml_backend_tensor_set(target_hidden, src, dst_offset, copy_bytes);
+
+            if ((int64_t) n_feat == target_hidden->ne[0]) {
+                for (int s = 0; s < n_seqs; s++) {
+                    if (!slot_info[s].data || slot_n_copy[s] <= 0) { continue; }
+                    const float * src = slot_info[s].data + slot_win_off[s] * n_feat;
+                    const size_t copy_bytes = n_feat * (size_t) slot_n_copy[s] * sizeof(float);
+                    const size_t dst_offset = (size_t) s * (size_t) per_slot_ctx * n_feat * sizeof(float);
+                    ggml_backend_tensor_set(target_hidden, src, dst_offset, copy_bytes);
+                }
             }
         }
 
