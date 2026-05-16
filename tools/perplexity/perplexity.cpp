@@ -141,7 +141,7 @@ static void process_logits(
     }
 }
 
-static void process_logits(std::ostream& out, int n_vocab, const float * logits, const int * tokens, int n_token,
+static bool process_logits(std::ostream& out, int n_vocab, const float * logits, const int * tokens, int n_token,
         std::vector<std::thread> & workers, std::vector<uint16_t> & log_probs, double & nll, double & nll2) {
     std::mutex mutex;
     const int nv = 2*((n_vocab + 1)/2) + 4;
@@ -169,7 +169,22 @@ static void process_logits(std::ostream& out, int n_vocab, const float * logits,
     for (auto & w : workers) {
         w.join();
     }
-    out.write((const char *)log_probs.data(), (size_t)n_token*nv*sizeof(uint16_t));
+    const size_t total = (size_t)n_token * nv * sizeof(uint16_t);
+    const char * ptr = (const char *)log_probs.data();
+    const size_t chunk = size_t(1) << 20;
+    size_t written = 0;
+
+    while (written < total) {
+        const std::streamsize to_write = (std::streamsize) std::min(chunk, total - written);
+        out.write(ptr + written, to_write);
+        if (!out.good()) {
+            LOG_ERR("%s: write failed at %zu/%zu bytes\n", __func__, written, total);
+            return false;
+        }
+        written += (size_t) to_write;
+    }
+
+    return true;
 }
 
 struct kl_divergence_result {
@@ -467,6 +482,12 @@ static results_perplexity perplexity(llama_context * ctx, const common_params & 
         LOG_INF("%s: saving all logits to %s\n", __func__, params.logits_file.c_str());
         logits_stream.write("_logits_", 8);
         logits_stream.write(reinterpret_cast<const char *>(&n_ctx), sizeof(n_ctx));
+        if (!logits_stream.good()) {
+            LOG_ERR("%s: failed writing logits header\n", __func__);
+            logits_stream.close();
+            std::remove(params.logits_file.c_str());
+            return {};
+        }
     }
 
     auto tim1 = std::chrono::high_resolution_clock::now();
@@ -523,6 +544,13 @@ static results_perplexity perplexity(llama_context * ctx, const common_params & 
         logits_stream.write((const char *)&n_vocab, sizeof(n_vocab));
         logits_stream.write((const char *)&n_chunk, sizeof(n_chunk));
         logits_stream.write((const char *)tokens.data(), (size_t)n_chunk*n_ctx*sizeof(tokens[0]));
+        if (!logits_stream.good()) {
+            LOG_ERR("%s: failed writing logits metadata (n_vocab=%d, n_chunk=%d)\n", __func__, n_vocab, n_chunk);
+            llama_batch_free(batch);
+            logits_stream.close();
+            std::remove(params.logits_file.c_str());
+            return {};
+        }
         const int nv = 2*((n_vocab + 1)/2) + 4;
         log_probs.resize((size_t)n_ctx * nv);
     }
@@ -616,9 +644,15 @@ static results_perplexity perplexity(llama_context * ctx, const common_params & 
 
             llama_token * tokens_data = tokens.data() + start + seq*n_ctx + first;
             if (!params.logits_file.empty()) {
-                process_logits(logits_stream, n_vocab, all_logits,
+                if (!process_logits(logits_stream, n_vocab, all_logits,
                         tokens_data, n_ctx - 1 - first,
-                        workers, log_probs, nll, nll2);
+                        workers, log_probs, nll, nll2)) {
+                    LOG_ERR("%s: removing partial logits file %s\n", __func__, params.logits_file.c_str());
+                    llama_batch_free(batch);
+                    logits_stream.close();
+                    std::remove(params.logits_file.c_str());
+                    return {};
+                }
             } else {
                 process_logits(n_vocab, all_logits,
                         tokens_data, n_ctx - 1 - first,
@@ -657,6 +691,23 @@ static results_perplexity perplexity(llama_context * ctx, const common_params & 
     }
 
     llama_batch_free(batch);
+
+    if (!params.logits_file.empty()) {
+        logits_stream.flush();
+        if (!logits_stream.good()) {
+            LOG_ERR("%s: failed flushing logits file %s\n", __func__, params.logits_file.c_str());
+            logits_stream.close();
+            std::remove(params.logits_file.c_str());
+            return {};
+        }
+
+        logits_stream.close();
+        if (!logits_stream.good()) {
+            LOG_ERR("%s: failed closing logits file %s\n", __func__, params.logits_file.c_str());
+            std::remove(params.logits_file.c_str());
+            return {};
+        }
+    }
 
     return {tokens, ppl, logit_history, prob_history};
 }
