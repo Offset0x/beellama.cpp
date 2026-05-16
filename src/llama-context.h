@@ -52,6 +52,13 @@ static inline bool llama_dflash_suppress_callback_for_prefill_ubatch_for_test(
     return prefill_plan_active && use_prefill_staging && !has_intersection;
 }
 
+static inline bool llama_dflash_prefill_plan_needs_staging_for_test(
+        int planned_tokens,
+        int current_ubatch_tokens) {
+    GGML_UNUSED(current_ubatch_tokens);
+    return planned_tokens > LLAMA_DFLASH_MAX_VERIFY_TOKENS;
+}
+
 struct llama_memory_recurrent;
 
 struct llama_model;

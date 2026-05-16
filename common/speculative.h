@@ -159,6 +159,12 @@ bool common_dflash_cpu_ring_valid_after_source_write_for_test(
         bool has_gpu_ring,
         bool cpu_data_all_layers);
 
+// test helper: returns true when tree/indexed update must fail closed because
+// only GPU hidden capture is available (no CPU hidden data).
+bool common_dflash_tree_update_requires_cpu_hidden_for_test(
+        bool has_cpu_hidden,
+        bool has_gpu_ring);
+
 // DDTree: build a tree of likely continuations from draft logits
 // tree_budget: internal total tree nodes for one draft call.
 // Public configuration uses branch_budget, then runtime adds the main draft path.
