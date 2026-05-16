@@ -5033,9 +5033,15 @@ int llama_context::decode(const llama_batch & batch_inp) {
                         dflash_capture->prefill_plan.active &&
                         dflash_capture->prefill_plan.n_tokens > 0;
 
-                    const bool use_prefill_staging =
+                    // Decide prefill staging from the full planned suffix span, not from
+                    // the current internal ubatch. A large suffix can end with a small
+                    // internal ubatch, and that tail must still append into the same
+                    // prefill_gpu staging buffer.
+                    const bool prefill_plan_needs_staging =
                         prefill_plan_active &&
-                        dflash_capture_n_tokens > LLAMA_DFLASH_MAX_VERIFY_TOKENS;
+                        dflash_capture->prefill_plan.n_tokens > LLAMA_DFLASH_MAX_VERIFY_TOKENS;
+
+                    const bool use_prefill_staging = prefill_plan_needs_staging;
 
                     if (dflash_capture && dflash_diagnostic_debug_enabled() && prefill_plan_active) {
                         LLAMA_LOG_INFO(

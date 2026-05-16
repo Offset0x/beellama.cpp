@@ -487,8 +487,8 @@ int main(int argc, char ** argv) {
         "graph reuse must key on prefill GPU staging topology");
     ok &= expect(context_cpp.find("use_prefill_staging") != std::string::npos,
         "decode loop must choose between prefill staging and verify hidden_gpu");
-    ok &= expect(context_cpp.find("dflash_capture_n_tokens > LLAMA_DFLASH_MAX_VERIFY_TOKENS") != std::string::npos,
-        "prefill staging must be selected when capture_n_tokens exceeds verify token capacity");
+    ok &= expect(context_cpp.find("prefill_plan_needs_staging") != std::string::npos,
+        "prefill staging must use the planned suffix span, not the current ubatch token count");
 
     // Prefill span math and flush
     ok &= expect(speculative_h.find("common_dflash_prefill_span") != std::string::npos,
@@ -845,6 +845,29 @@ int main(int argc, char ** argv) {
     ok &= expect(!llama_dflash_suppress_callback_for_prefill_ubatch_for_test(
         false, true, false),
         "inactive plan must not suppress callback");
+
+    // Planned-span prefill staging must use the planned suffix size, not the
+    // current internal ubatch token count.  A 280-token suffix split into
+    // 256+24 internal ubatches must keep using prefill staging for both parts.
+    ok &= expect(llama_dflash_prefill_plan_needs_staging_for_test(280, 256),
+        "280-token plan needs staging even when current ubatch is 256");
+    ok &= expect(llama_dflash_prefill_plan_needs_staging_for_test(280, 24),
+        "280-token plan needs staging even when current ubatch tail is 24");
+    ok &= expect(!llama_dflash_prefill_plan_needs_staging_for_test(4, 4),
+        "4-token verify-sized plan does not need staging");
+    ok &= expect(!llama_dflash_prefill_plan_needs_staging_for_test(
+        LLAMA_DFLASH_MAX_VERIFY_TOKENS, LLAMA_DFLASH_MAX_VERIFY_TOKENS),
+        "verify-max plan does not need staging");
+
+    // Tree/indexed update must fail closed when only GPU hidden capture is
+    // available (no CPU hidden data). GPU ring + no CPU hidden means the
+    // indexed writer cannot access CPU hidden data.
+    ok &= expect(common_dflash_tree_update_requires_cpu_hidden_for_test(false, true),
+        "GPU ring without CPU hidden must fail closed");
+    ok &= expect(!common_dflash_tree_update_requires_cpu_hidden_for_test(true, true),
+        "CPU hidden available: indexed writer can proceed");
+    ok &= expect(!common_dflash_tree_update_requires_cpu_hidden_for_test(false, false),
+        "No GPU ring: CPU fallback world, not the GPU-only hazard");
 
     return ok ? 0 : 1;
 }

@@ -2579,6 +2579,22 @@ struct common_speculative_state_dflash : public common_speculative_state {
             return;
         }
 
+        // The indexed/tree update path currently writes arbitrary captured rows
+        // through ring_write_by_indices(), which is CPU-hidden-only. When GPU
+        // hidden capture is active, llama_get_layer_hidden_n_tokens() can report
+        // valid rows while llama_get_layer_hidden() returns null. Do not silently
+        // claim success in that state.
+        float * cpu_hidden0 = llama_get_layer_hidden(ctx_tgt, 0);
+        if (!cpu_hidden0 && gpu_ring_handle) {
+            LOG_ERR("dflash tree update requires indexed GPU hidden write, but only GPU hidden capture is available; disabling DFlash ring for this slot\n");
+            ring_write_pos = 0;
+            ring_filled = 0;
+            committed_len = 0;
+            cpu_ring_valid = false;
+            llama_dflash_kv_cache_reset(ctx_dft);
+            return;
+        }
+
         const int actual_written = ring_write_by_indices(capture_indices);
         committed_len += actual_written;
         update_drafter_kv_cache(actual_written);
@@ -2606,7 +2622,6 @@ private:
         if (n_tokens <= 0) return 0;
 
         const bool use_prefill_gpu = (source == dflash_capture_source::prefill_gpu_hidden);
-        const bool use_verify_gpu  = (source == dflash_capture_source::verify_gpu_hidden);
         const bool source_has_cpu_hidden = (source == dflash_capture_source::cpu_hidden);
 
         // CPU ring is valid only if this write actually refreshes ring_buf
@@ -2784,8 +2799,10 @@ private:
                 wrote_this_layer++;
             }
             if (wrote_this_layer < n_tokens) {
-                LOG_WRN("DFLASH_DBG ring_write_by_indices MISMATCH: requested=%d prefix=%d ntok=%lld ring_write_pos=%d ring_filled=%d committed_len=%d\n",
-                    n_tokens, wrote_this_layer, (long long)ntok, ring_write_pos, ring_filled, committed_len);
+                if (common_dflash_debug_logs_enabled()) {
+                    LOG_INF("DFLASH_DBG ring_write_by_indices MISMATCH: requested=%d prefix=%d ntok=%lld ring_write_pos=%d ring_filled=%d committed_len=%d\n",
+                        n_tokens, wrote_this_layer, (long long) ntok, ring_write_pos, ring_filled, committed_len);
+                }
             }
             if (first_layer) {
                 actual_written = wrote_this_layer;
@@ -3724,4 +3741,10 @@ bool common_dflash_should_refuse_large_prefill_fallback_for_test(
         bool use_prefill_gpu,
         bool has_gpu_ring) {
     return !use_prefill_gpu && requested > LLAMA_DFLASH_MAX_VERIFY_TOKENS && has_gpu_ring;
+}
+
+bool common_dflash_tree_update_requires_cpu_hidden_for_test(
+        bool has_cpu_hidden,
+        bool has_gpu_ring) {
+    return !has_cpu_hidden && has_gpu_ring;
 }
