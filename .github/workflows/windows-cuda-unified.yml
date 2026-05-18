@@ -1,0 +1,63 @@
+name: Windows CUDA 13.1 (Unified Build)
+
+on:
+  push:
+    branches:
+      - 'gemma-4-31b'
+  workflow_dispatch:
+
+jobs:
+  windows-cuda-unified:
+    runs-on: windows-2022
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: windows-cuda-13.1-unified
+          variant: ccache
+          evict-old-files: 1d
+
+      # USING THEIR OFFICIAL LOCAL CUDA SETUP ACTION
+      - name: Install Cuda Toolkit
+        uses: ./.github/actions/windows-setup-cuda
+        with:
+          cuda_version: '13.1'
+
+      - name: Install Ninja
+        run: |
+          choco install ninja
+
+      - name: Build (Merged CPU + CUDA Flags)
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DGGML_BACKEND_DL=ON ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_OPENMP=ON ^
+            -DGGML_CUDA=ON ^
+            -DGGML_CUDA_FA_ALL_QUANTS=ON ^
+            -DLLAMA_BUILD_BORINGSSL=ON ^
+            -DGGML_CUDA_CUB_3DOT2=ON ^
+            -DLLAMA_BUILD_EXAMPLES=OFF ^
+            -DLLAMA_BUILD_TESTS=OFF ^
+            -DLLAMA_BUILD_TOOLS=ON ^
+            -DLLAMA_BUILD_SERVER=ON ^
+            -DGGML_RPC=ON
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS%
+
+      - name: Pack artifacts
+        run: |
+          7z a -snl llama-bin-win-cuda-13.1.zip .\build\bin\Release\*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          path: llama-bin-win-cuda-13.1.zip
+          name: llama-bin-win-cuda-13.1.zip
