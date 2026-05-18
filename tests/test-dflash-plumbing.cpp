@@ -657,6 +657,26 @@ int main(int argc, char ** argv) {
     ok &= expect(llama_h.find("llama_context_recurrent_expand") != std::string::npos, "public API must expose context-level recurrent expansion with graph invalidation");
     ok &= expect(server_context.find("llama_context_recurrent_shrink(ctx, n_parallel_user)") != std::string::npos, "server recurrent shrink must invalidate the context scheduler graph cache");
     ok &= expect(server_context.find("llama_context_recurrent_expand(ctx, n_seq_max_full)") != std::string::npos, "server recurrent expansion must invalidate the context scheduler graph cache");
+    ok &= expect(server_context.find("bool recurrent_shrink_for_prompt_cache(const char * reason)") != std::string::npos,
+        "server must shrink expanded recurrent backup cells around prompt-cache restore");
+    ok &= expect(server_context.find("recurrent_shrink_for_prompt_cache(\"before prompt cache save/load\")") != std::string::npos &&
+                 server_context.find("if (update_cache)") < server_context.find("recurrent_shrink_for_prompt_cache(\"before prompt cache save/load\")"),
+        "server must only shrink recurrent state for an actual prompt-cache save/load");
+    ok &= expect(server_context.find("void recurrent_expand_after_prompt_cache(const char * reason)") != std::string::npos &&
+                 server_context.find("recurrent_expand_after_prompt_cache(\"after prompt cache save/load\")") != std::string::npos,
+        "server must expand recurrent backup cells again before normal prefill graph reservation");
+    ok &= expect(server_context.find("llama_seq_id seq_id_backup = -1") != std::string::npos &&
+                 server_context.find("slot.seq_id_backup = seq_backup") != std::string::npos &&
+                 server_context.find("const llama_seq_id seq_backup = slot.seq_id_backup") != std::string::npos,
+        "server speculative backup cleanup must track the actual backup seq_id");
+    ok &= expect(server_context.find("if (has_draft_backup && seq_id_backup >= 0)") != std::string::npos,
+        "server slot release must clean up leaked speculative backup sequences");
+    ok &= expect(server_context.find("params_base.kv_unified && task.n_tokens() > 0") != std::string::npos &&
+                 server_context.find("cells_committed += std::max((int64_t) s.prompt.n_tokens(), (int64_t) s.task->n_tokens())") != std::string::npos &&
+                 server_context.find("cells_available < (int64_t) task.n_tokens()") != std::string::npos,
+        "unified KV scheduling must account for active slot cell commitments before launch");
+    ok &= expect(server_context.find("task.n_tokens() < slot->n_ctx") != std::string::npos,
+        "unified KV deferral must let oversized tasks reach existing context-size validation instead of starving");
     ok &= expect(context_cpp.find("bool llama_context::resize_recurrent_memory") != std::string::npos, "context recurrent resize must be implemented at context level");
     ok &= expect(context_cpp.find("sched_need_reserve = true") != std::string::npos, "context recurrent resize must reserve a fresh scheduler graph after tensor reallocation");
     ok &= expect(server_context.find("dflash_profit_controller") == std::string::npos, "DFlash profit controller must use the normal adaptive depth probe path");
