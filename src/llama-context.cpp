@@ -3647,7 +3647,7 @@ void llama_context::set_cross_data_gpu(
 }
 
 bool llama_context::dflash_kv_cache_init(int ctx_size) {
-    if (ctx_size <= 0 || model.arch != LLM_ARCH_DFLASH_DRAFT) {
+    if (ctx_size <= 0 || !llm_arch_is_dflash_drafter(model.arch)) {
         return false;
     }
     if (model.n_devices() > 1) {
@@ -3786,7 +3786,7 @@ bool llama_context::dflash_kv_cache_prepare(int ctx_window) {
 }
 
 bool llama_context::dflash_kv_cache_update(int n_tokens) {
-    if (!dflash_kv_cache || n_tokens <= 0 || model.arch != LLM_ARCH_DFLASH_DRAFT) {
+    if (!dflash_kv_cache || n_tokens <= 0 || !llm_arch_is_dflash_drafter(model.arch)) {
         return false;
     }
     if (model.n_devices() > 1) {

@@ -45,7 +45,6 @@ int main(int argc, char ** argv) {
     ok &= expect(!llama_dflash_gpu_tape_supported_arch(LLM_ARCH_QWEN3NEXT), "Qwen3Next must stay on fallback");
     ok &= expect(!llama_dflash_gpu_tape_supported_arch(LLM_ARCH_KIMI_LINEAR), "Kimi-linear must stay on fallback");
     ok &= expect(!llama_dflash_gpu_tape_supported_arch(LLM_ARCH_UNKNOWN), "unknown arch must stay on fallback");
-
     ok &= expect(argc == 2, "expected repo root argument");
     if (!ok) {
         return 1;
@@ -69,6 +68,7 @@ int main(int argc, char ** argv) {
     const std::string download_cpp = read_file(root + "/common/download.cpp");
     const std::string arg_cpp = read_file(root + "/common/arg.cpp");
     const std::string dflash_draft = read_file(root + "/src/models/dflash_draft.cpp");
+    const std::string arch_cpp = read_file(root + "/src/llama-arch.cpp");
     const std::string memory_h = read_file(root + "/src/llama-memory.h");
     const std::string memory_hybrid_h = read_file(root + "/src/llama-memory-hybrid.h");
     const std::string memory_hybrid = read_file(root + "/src/llama-memory-hybrid.cpp");
@@ -198,6 +198,25 @@ int main(int argc, char ** argv) {
         "turbo3_tcq/turbo3_tcq FlashAttention template instance must include D=512");
     ok &= expect(cuda_template_generator.find("DECL_FATTN_VEC_CASE(512, {type_k}, {type_v});") != std::string::npos,
         "CUDA template generator must preserve D=512 quantized FlashAttention vector instances");
+    ok &= expect(arch_cpp.find("{ LLM_ARCH_DFLASH,") != std::string::npos,
+        "upstream dflash architecture must be registered separately");
+    ok &= expect(arch_cpp.find("{ LLM_ARCH_DFLASH,           \"dflash\"") != std::string::npos &&
+                 arch_cpp.find("{ LLM_ARCH_DFLASH_DRAFT,     \"dflash-draft\"") != std::string::npos,
+        "upstream and Bee DFlash architecture names must both be recognized");
+    ok &= expect(arch_cpp.find("bool llm_arch_is_dflash_drafter") != std::string::npos &&
+                 arch_cpp.find("arch == LLM_ARCH_DFLASH || arch == LLM_ARCH_DFLASH_DRAFT") != std::string::npos,
+        "both DFlash schemas must be treated as DFlash drafters");
+    ok &= expect(arch_cpp.find("LLM_TENSOR_DFLASH_UPSTREAM_FC") != std::string::npos &&
+                 arch_cpp.find("\"fc\"") != std::string::npos &&
+                 arch_cpp.find("\"hidden_norm\"") != std::string::npos,
+        "upstream DFlash tensor names must be registered separately");
+    ok &= expect(model_cpp.find("\"dflash.block_size\"") != std::string::npos &&
+                 model_cpp.find("\"dflash.target_layer_ids\"") != std::string::npos,
+        "upstream DFlash metadata keys must be read literally");
+    ok &= expect(model_cpp.find("LLM_TENSOR_DFLASH_UPSTREAM_FC") != std::string::npos,
+        "upstream DFlash must use upstream fusion tensor names");
+    ok &= expect(model_cpp.find("arch == LLM_ARCH_DFLASH ? LLM_TENSOR_FFN_NORM : LLM_TENSOR_ATTN_POST_NORM") != std::string::npos,
+        "upstream DFlash must use ffn_norm where Bee DFlash uses post_attention_norm");
     ok &= expect(dflash_draft.find("bool can_reuse(const llm_graph_params & params) override") != std::string::npos, "DFlash drafter graph input must opt into graph reuse");
     ok &= expect(dflash_draft.find("dflash_draft_ctx_len(params.cross, params.cparams) != ctx_len") != std::string::npos, "DFlash drafter reuse must invalidate on cross bucket shape changes");
     ok &= expect(dflash_draft.find("dflash_kv_cache_ready_for_window(params.cross, ctx_len) != use_kv_cache") != std::string::npos, "DFlash drafter reuse must invalidate when K/V cache topology changes");

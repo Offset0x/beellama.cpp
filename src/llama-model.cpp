@@ -26,6 +26,7 @@
 #include <cstring>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <regex>
@@ -737,6 +738,79 @@ static void detect_recurrent_layers_qwen35(
     ml.get_key(LLM_KV_FULL_ATTENTION_INTERVAL, full_attn_interval, false);
     for (uint32_t i = 0; i < hparams.n_layer; ++i) {
         hparams.recurrent_layer_arr[i] = ((i + 1) % full_attn_interval != 0);
+    }
+}
+
+static bool load_dflash_target_layer_ids(
+        llama_model_loader & ml,
+        const std::string & key,
+        llama_hparams & hparams,
+        bool required) {
+    const int kid = gguf_find_key(ml.metadata, key.c_str());
+    if (kid < 0 || gguf_get_kv_type(ml.metadata, kid) != GGUF_TYPE_ARRAY) {
+        if (required) {
+            throw std::runtime_error(format("array key not found in model: %s", key.c_str()));
+        }
+        return false;
+    }
+
+    const enum gguf_type type = gguf_get_arr_type(ml.metadata, kid);
+    if (type != GGUF_TYPE_UINT32 && type != GGUF_TYPE_INT32) {
+        throw std::runtime_error(format("dflash: %s must be a uint32/int32 array", key.c_str()));
+    }
+
+    const size_t n = gguf_get_arr_n(ml.metadata, kid);
+    if (n == 0) {
+        throw std::runtime_error(format("dflash: %s must not be empty", key.c_str()));
+    }
+    if (n > 8) {
+        throw std::runtime_error(format("dflash: %s has %zu entries, max is 8", key.c_str(), n));
+    }
+
+    hparams.dflash_n_target_layers = (uint32_t) n;
+    for (uint32_t & id : hparams.dflash_target_layer_ids) {
+        id = 0;
+    }
+
+    const void * data = gguf_get_arr_data(ml.metadata, kid);
+    for (uint32_t i = 0; i < hparams.dflash_n_target_layers; ++i) {
+        if (type == GGUF_TYPE_INT32) {
+            const int32_t id = ((const int32_t *) data)[i];
+            if (id < 0) {
+                throw std::runtime_error(format("dflash: %s contains negative layer id %d", key.c_str(), id));
+            }
+            hparams.dflash_target_layer_ids[i] = (uint32_t) id;
+        } else {
+            hparams.dflash_target_layer_ids[i] = ((const uint32_t *) data)[i];
+        }
+    }
+
+    return true;
+}
+
+static void validate_dflash_hparams(const llama_hparams & hparams, llm_arch arch) {
+    if (hparams.dflash_block_size <= 1) {
+        throw std::runtime_error(format("%s: dflash block_size must be > 1", llm_arch_name(arch)));
+    }
+    if (hparams.dflash_n_target_layers == 0) {
+        throw std::runtime_error(format("%s: dflash target_layer_ids are required", llm_arch_name(arch)));
+    }
+
+    const uint64_t expected =
+        (uint64_t) hparams.dflash_n_target_layers * (uint64_t) hparams.n_embd;
+    if (expected == 0 || expected > std::numeric_limits<uint32_t>::max()) {
+        throw std::runtime_error(format(
+            "%s: invalid inferred dflash n_target_features=%llu",
+            llm_arch_name(arch),
+            (unsigned long long) expected));
+    }
+    if ((uint64_t) hparams.dflash_n_target_features != expected) {
+        throw std::runtime_error(format(
+            "%s: dflash n_target_features=%u must equal n_target_layers=%u * n_embd=%u",
+            llm_arch_name(arch),
+            hparams.dflash_n_target_features,
+            hparams.dflash_n_target_layers,
+            hparams.n_embd));
     }
 }
 
@@ -2985,24 +3059,33 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                     default: type = LLM_TYPE_UNKNOWN;
                 }
             } break;
+        case LLM_ARCH_DFLASH:
         case LLM_ARCH_DFLASH_DRAFT:
             {
                 ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
-                ml.get_key(LLM_KV_DFLASH_BLOCK_SIZE,          hparams.dflash_block_size,        false);
-                ml.get_key(LLM_KV_DFLASH_MASK_TOKEN_ID,       hparams.dflash_mask_token_id,     false);
-                ml.get_key(LLM_KV_DFLASH_N_TARGET_FEATURES,   hparams.dflash_n_target_features, false);
-                {
-                    const std::string key = ml.llm_kv(LLM_KV_DFLASH_TARGET_LAYER_IDS);
-                    const int kid = gguf_find_key(ml.metadata, key.c_str());
-                    if (kid >= 0) {
-                        const size_t n = gguf_get_arr_n(ml.metadata, kid);
-                        hparams.dflash_n_target_layers = std::min((uint32_t) n, (uint32_t) 8);
-                        const void * data = gguf_get_arr_data(ml.metadata, kid);
-                        for (uint32_t i = 0; i < hparams.dflash_n_target_layers; ++i) {
-                            hparams.dflash_target_layer_ids[i] = ((const uint32_t *) data)[i];
-                        }
+
+                if (arch == LLM_ARCH_DFLASH_DRAFT) {
+                    ml.get_key(LLM_KV_DFLASH_BLOCK_SIZE,          hparams.dflash_block_size,        false);
+                    ml.get_key(LLM_KV_DFLASH_MASK_TOKEN_ID,       hparams.dflash_mask_token_id,     false);
+                    ml.get_key(LLM_KV_DFLASH_N_TARGET_FEATURES,   hparams.dflash_n_target_features, false);
+                    load_dflash_target_layer_ids(ml, ml.llm_kv(LLM_KV_DFLASH_TARGET_LAYER_IDS), hparams, false);
+                } else {
+                    ml.get_key("dflash.block_size",    hparams.dflash_block_size);
+                    ml.get_key("dflash.mask_token_id", hparams.dflash_mask_token_id);
+                    load_dflash_target_layer_ids(ml, "dflash.target_layer_ids", hparams, true);
+
+                    const uint64_t n_features =
+                        (uint64_t) hparams.dflash_n_target_layers * (uint64_t) hparams.n_embd;
+                    if (n_features == 0 || n_features > std::numeric_limits<uint32_t>::max()) {
+                        throw std::runtime_error(format(
+                            "dflash: invalid inferred n_target_features=%llu",
+                            (unsigned long long) n_features));
                     }
+                    hparams.dflash_n_target_features = (uint32_t) n_features;
                 }
+
+                validate_dflash_hparams(hparams, arch);
+
                 // Optional SWA: when keys are absent, n_swa stays 0 and all layers use full attention
                 ml.get_key(LLM_KV_ATTENTION_SLIDING_WINDOW, hparams.n_swa, false);
                 if (hparams.n_swa > 0) {
@@ -7838,6 +7921,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", i), {n_embd,   n_ff}, 0);
                     }
                 } break;
+            case LLM_ARCH_DFLASH:
             case LLM_ARCH_DFLASH_DRAFT:
                 {
                     // shared from target at runtime — not present in GGUF
@@ -7847,14 +7931,21 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
 
                     // DFlash fusion layer
-                    dflash_fc          = create_tensor(tn(LLM_TENSOR_DFLASH_FC,          "weight"), {(int64_t)hparams.dflash_n_target_features, n_embd}, 0);
-                    dflash_hidden_norm = create_tensor(tn(LLM_TENSOR_DFLASH_HIDDEN_NORM, "weight"), {n_embd}, 0);
+                    const llm_tensor dflash_fc_tensor =
+                        arch == LLM_ARCH_DFLASH ? LLM_TENSOR_DFLASH_UPSTREAM_FC : LLM_TENSOR_DFLASH_FC;
+                    const llm_tensor dflash_hidden_norm_tensor =
+                        arch == LLM_ARCH_DFLASH ? LLM_TENSOR_DFLASH_UPSTREAM_HIDDEN_NORM : LLM_TENSOR_DFLASH_HIDDEN_NORM;
+                    const llm_tensor attn_post_norm_tensor =
+                        arch == LLM_ARCH_DFLASH ? LLM_TENSOR_FFN_NORM : LLM_TENSOR_ATTN_POST_NORM;
+
+                    dflash_fc          = create_tensor(tn(dflash_fc_tensor,          "weight"), {(int64_t)hparams.dflash_n_target_features, n_embd}, 0);
+                    dflash_hidden_norm = create_tensor(tn(dflash_hidden_norm_tensor, "weight"), {n_embd}, 0);
 
                     for (int i = 0; i < n_layer; ++i) {
                         auto & layer = layers[i];
 
                         layer.attn_norm      = create_tensor(tn(LLM_TENSOR_ATTN_NORM,      "weight", i), {n_embd}, 0);
-                        layer.attn_post_norm = create_tensor(tn(LLM_TENSOR_ATTN_POST_NORM, "weight", i), {n_embd}, 0);
+                        layer.attn_post_norm = create_tensor(tn(attn_post_norm_tensor,     "weight", i), {n_embd}, 0);
 
                         layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q,   "weight", i), {n_embd, n_embd_head_k * n_head}, 0);
                         layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K,   "weight", i), {n_embd, n_embd_k_gqa}, 0);
@@ -8527,6 +8618,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
         case LLM_ARCH_LLADA:
         case LLM_ARCH_LLADA_MOE:
         case LLM_ARCH_RND1:
+        case LLM_ARCH_DFLASH:
         case LLM_ARCH_DFLASH_DRAFT:
             {
                 res = nullptr;
@@ -9153,6 +9245,7 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
             {
                 llm = std::make_unique<llm_build_step35_iswa>(*this, params);
             } break;
+        case LLM_ARCH_DFLASH:
         case LLM_ARCH_DFLASH_DRAFT:
             {
                 if (params.gtype == LLM_GRAPH_TYPE_DFLASH_KV_UPDATE) {
@@ -9413,6 +9506,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_QWEN3NEXT:
         case LLM_ARCH_MIMO2:
         case LLM_ARCH_STEP35:
+        case LLM_ARCH_DFLASH:
         case LLM_ARCH_DFLASH_DRAFT:
             return LLAMA_ROPE_TYPE_NEOX;
 
