@@ -4814,6 +4814,35 @@ extern "C" bool dflash_cuda_backend_wait_for_stream(ggml_backend_t backend) {
     return err == cudaSuccess;
 }
 
+extern "C" bool dflash_cuda_backend_wait_for_dflash_stream(ggml_backend_t backend) {
+    if (!ggml_backend_is_cuda(backend)) {
+        return false;
+    }
+
+    ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
+    ggml_cuda_set_device(cuda_ctx->device);
+
+    static thread_local cudaEvent_t dflash_backend_wait_events[GGML_CUDA_MAX_DEVICES] = {};
+    cudaEvent_t & event = dflash_backend_wait_events[cuda_ctx->device];
+    if (event == nullptr) {
+        cudaError_t err = cudaEventCreateWithFlags(&event, cudaEventDisableTiming);
+        if (err != cudaSuccess) {
+            event = nullptr;
+            return cudaStreamSynchronize(cudaStreamPerThread) == cudaSuccess;
+        }
+    }
+
+    cudaError_t err = cudaEventRecord(event, cudaStreamPerThread);
+    if (err == cudaSuccess) {
+        err = cudaStreamWaitEvent(cuda_ctx->stream(), event, 0);
+    }
+    if (err != cudaSuccess) {
+        return cudaStreamSynchronize(cudaStreamPerThread) == cudaSuccess;
+    }
+
+    return true;
+}
+
 int ggml_backend_cuda_get_device_count() {
     return ggml_cuda_info().device_count;
 }
@@ -5602,8 +5631,12 @@ extern "C" bool   dflash_rebuild_conv_state(void *, const void *, int, int, int)
 extern "C" bool   dflash_cuda_copy_d2d(void *, const void *, size_t);
 extern "C" bool   dflash_cuda_prepare_ptr(const void *);
 extern "C" bool   dflash_cuda_copy_d2d_no_check(void *, const void *, size_t);
+extern "C" bool   dflash_cuda_set_device(int);
 extern "C" bool   dflash_cuda_synchronize_ptr(const void *);
+extern "C" bool   dflash_cuda_ptr_device(const void *, int *);
+extern "C" bool   dflash_cuda_synchronize_device(int);
 extern "C" bool   dflash_cuda_backend_wait_for_stream(ggml_backend_t);
+extern "C" bool   dflash_cuda_backend_wait_for_dflash_stream(ggml_backend_t);
 extern "C" bool dflash_replay_gdn_state_no_check(void *, const void *, const void *, const void *, const void *, int, int, int, int);
 extern "C" void   dflash_cross_ring_gpu_synchronize(void *);
 extern "C" const float * dflash_cross_ring_gpu_interleave(void *, int, int, int);
@@ -5660,11 +5693,23 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     if (strcmp(name, "dflash_cuda_copy_d2d_no_check") == 0) {
         return (void *)dflash_cuda_copy_d2d_no_check;
     }
+    if (strcmp(name, "dflash_cuda_set_device") == 0) {
+        return (void *)dflash_cuda_set_device;
+    }
     if (strcmp(name, "dflash_cuda_synchronize_ptr") == 0) {
         return (void *)dflash_cuda_synchronize_ptr;
     }
+    if (strcmp(name, "dflash_cuda_ptr_device") == 0) {
+        return (void *)dflash_cuda_ptr_device;
+    }
+    if (strcmp(name, "dflash_cuda_synchronize_device") == 0) {
+        return (void *)dflash_cuda_synchronize_device;
+    }
     if (strcmp(name, "dflash_cuda_backend_wait_for_stream") == 0) {
         return (void *)dflash_cuda_backend_wait_for_stream;
+    }
+    if (strcmp(name, "dflash_cuda_backend_wait_for_dflash_stream") == 0) {
+        return (void *)dflash_cuda_backend_wait_for_dflash_stream;
     }
     if (strcmp(name, "dflash_replay_gdn_state_no_check") == 0) {
         return (void *)dflash_replay_gdn_state_no_check;

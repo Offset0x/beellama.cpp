@@ -351,6 +351,10 @@ extern "C" bool dflash_cuda_copy_d2d_no_check(void * dst, const void * src, size
     return cudaGetLastError() == cudaSuccess;
 }
 
+extern "C" bool dflash_cuda_set_device(int device) {
+    return device >= 0 && cudaSetDevice(device) == cudaSuccess;
+}
+
 extern "C" bool dflash_cuda_synchronize_ptr(const void * ptr) {
     if (!ptr) return false;
 
@@ -372,6 +376,40 @@ extern "C" bool dflash_cuda_synchronize_ptr(const void * ptr) {
     (void)cudaSetDevice(attr.device);
 #endif
 
+    return cudaStreamSynchronize(cudaStreamPerThread) == cudaSuccess;
+}
+
+extern "C" bool dflash_cuda_ptr_device(const void * ptr, int * device) {
+    if (!ptr || !device) return false;
+
+    cudaPointerAttributes attr;
+    cudaError_t err = cudaPointerGetAttributes(&attr, ptr);
+    if (err != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+#if CUDART_VERSION >= 10000 || defined(GGML_USE_HIP)
+    if (attr.type != cudaMemoryTypeDevice) {
+        return false;
+    }
+    *device = attr.device;
+#else
+    if (attr.memoryType != cudaMemoryTypeDevice) {
+        return false;
+    }
+    *device = attr.device;
+#endif
+
+    (void)cudaSetDevice(*device);
+    return true;
+}
+
+extern "C" bool dflash_cuda_synchronize_device(int device) {
+    if (device < 0) return false;
+
+    if (cudaSetDevice(device) != cudaSuccess) {
+        return false;
+    }
     return cudaStreamSynchronize(cudaStreamPerThread) == cudaSuccess;
 }
 
