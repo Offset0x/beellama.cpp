@@ -776,6 +776,12 @@ int main(int argc, char ** argv) {
 
     ok &= expect(server_context.find("common_speculative_set_prefill_capture_enabled(slot.spec.get(), dflash_capture_needed_for_view)") != std::string::npos,
         "server must toggle DFlash hidden capture before target decode");
+    ok &= expect(server_context.find("mixed prompt/generation prefill view") != std::string::npos &&
+                 server_context.find("common_speculative_discard_dflash_state(slot.spec.get(), \"mixed prompt/generation prefill view\")") != std::string::npos,
+        "server must fail closed for prompt DFlash prefill when the same view contains generation");
+    ok &= expect(server_context.find("dflash_mark_skip_begin(slot.id)") != std::string::npos &&
+                 server_context.find("dflash_should_skip_begin(slot.id)") != std::string::npos,
+        "server must not rebuild DFlash state from the same unsafe mixed prefill view");
 
     ok &= expect(server_context.find("SLOT_STATE_GENERATING") != std::string::npos &&
                  server_context.find("dflash_capture_needed_for_view = true") != std::string::npos,
@@ -1067,9 +1073,26 @@ int main(int argc, char ** argv) {
     ok &= expect(common_dflash_prefill_capture_complete_for_test(0, 0),
         "capture complete: zero requested must be complete");
 
-    // Mismatch in server must disable DFlash drafting
-    ok &= expect(server_context.find("common_speculative_set_prefill_capture_enabled(pf.spec, false)") != std::string::npos,
-        "prefill flush mismatch must disable DFlash capture for the affected slot");
+    // Mismatch in server must discard DFlash state and disable capture for the affected slot
+    ok &= expect(speculative_h.find("common_speculative_discard_dflash_state") != std::string::npos,
+        "DFlash must expose explicit state discard for unsafe flush/capture paths");
+    ok &= expect(speculative.find("void discard_cross_ring(const char * reason)") != std::string::npos &&
+                 speculative.find("ring_write_pos = 0") != std::string::npos &&
+                 speculative.find("committed_len = 0") != std::string::npos &&
+                 speculative.find("llama_dflash_kv_cache_reset(ctx_dft)") != std::string::npos,
+        "DFlash state discard must clear ring counters and K/V projection cache");
+    ok &= expect(speculative.find("discard_cross_ring(\"GPU hidden D2D ring write failed\")") != std::string::npos,
+        "DFlash GPU D2D write failure must discard cross-ring state");
+    ok &= expect(speculative.find("ring_write_discarded") != std::string::npos &&
+                 count_occurrences(speculative, "if (ring_write_discarded)") >= 2,
+        "DFlash ring-write callers must not re-commit state after an internal discard");
+    ok &= expect(speculative.find("actual_written != to_write") != std::string::npos &&
+                 speculative.find("discard_cross_ring(\"incomplete prefill flush\")") != std::string::npos,
+        "incomplete DFlash prefill flush must discard cross-ring state");
+    ok &= expect(server_context.find("common_speculative_discard_dflash_state(pf.spec, \"prefill flush mismatch\")") != std::string::npos &&
+                 server_context.find("dflash_mark_skip_begin(pf.slot_id)") != std::string::npos &&
+                 server_context.find("common_speculative_set_prefill_capture_enabled(pf.spec, false)") != std::string::npos,
+        "prefill flush mismatch must discard DFlash state, skip begin, and disable capture for the affected slot");
 
     ok &= expect(speculative_h.find("common_speculative_note_prefill_suffix_scheduled") != std::string::npos,
         "DFlash must expose a separate prefill-suffix scheduled marker");

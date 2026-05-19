@@ -127,6 +127,10 @@ int common_speculative_flush_prefill(common_speculative * spec, int src_offset =
 // cross-context suffix during long prompt processing.
 void common_speculative_set_prefill_capture_enabled(common_speculative * spec, bool enabled);
 
+// Discard any DFlash cross-ring state after a failed or unsafe capture/flush.
+// No-op for non-DFlash speculative implementations.
+void common_speculative_discard_dflash_state(common_speculative * spec, const char * reason);
+
 // Mark that this DFlash speculative state has a scheduled suffix-prefill flush.
 // This is separate from enabling target hidden capture, because capture activity
 // is global to the target context while suffix accounting is per server slot.

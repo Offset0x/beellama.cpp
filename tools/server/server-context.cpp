@@ -4696,6 +4696,17 @@ private:
                 common_dflash_prefill_span span;
             };
             std::vector<pending_dflash_prefill_flush> pending_prefill_flushes;
+            std::vector<int> dflash_skip_begin_slots;
+            auto dflash_mark_skip_begin = [&](int slot_id) {
+                if (std::find(dflash_skip_begin_slots.begin(), dflash_skip_begin_slots.end(), slot_id) ==
+                        dflash_skip_begin_slots.end()) {
+                    dflash_skip_begin_slots.push_back(slot_id);
+                }
+            };
+            auto dflash_should_skip_begin = [&](int slot_id) {
+                return std::find(dflash_skip_begin_slots.begin(), dflash_skip_begin_slots.end(), slot_id) !=
+                    dflash_skip_begin_slots.end();
+            };
 
             if (params_base.speculative.type == COMMON_SPECULATIVE_TYPE_DFLASH) {
                 bool dflash_view_has_generating = false;
@@ -4722,10 +4733,18 @@ private:
                         continue;
                     }
 
-                    if (!dflash_view_has_generating &&
-                            (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_DONE_PROMPT)) {
+                    if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_DONE_PROMPT) {
                         auto span = should_flush_dflash_prefill(slot, batch_view, true);
                         if (span.should_flush) {
+                            if (dflash_view_has_generating) {
+                                common_speculative_discard_dflash_state(slot.spec.get(), "mixed prompt/generation prefill view");
+                                dflash_mark_skip_begin(slot.id);
+                                if (dflash_server_profile_enabled(DFLASH_PROFILE_PREFILL)) {
+                                    SLT_WRN(slot, "%s", "dflash prefill: skipping suffix flush in mixed prompt/generation view; discarded DFlash state");
+                                }
+                                continue;
+                            }
+
                             dflash_capture_needed_for_view = true;
                             // Store the flush decision so we can execute it after
                             // decode regardless of slot state transitions.
@@ -4864,6 +4883,8 @@ private:
                     SRV_ERR("dflash prefill flush mismatch: slot=%d requested=%d written=%d src_offset=%d; disabling DFlash drafting until fresh hiddens are available\n",
                             pf.slot_id, pf.span.n_tokens, written, pf.span.src_offset);
 
+                    common_speculative_discard_dflash_state(pf.spec, "prefill flush mismatch");
+                    dflash_mark_skip_begin(pf.slot_id);
                     common_speculative_set_prefill_capture_enabled(pf.spec, false);
                 }
             }
@@ -4930,11 +4951,22 @@ private:
                     slot.state = SLOT_STATE_GENERATING;
 
                     if (slot.can_speculate()) {
+                        bool begin_speculative_state = true;
                         if (params_base.speculative.type == COMMON_SPECULATIVE_TYPE_DFLASH) {
                             llama_dflash_set_active_slot(ctx, slot.id);
-                            common_speculative_set_prefill_capture_enabled(slot.spec.get(), true);
+                            if (dflash_should_skip_begin(slot.id)) {
+                                common_speculative_set_prefill_capture_enabled(slot.spec.get(), false);
+                                begin_speculative_state = false;
+                                if (dflash_server_profile_enabled(DFLASH_PROFILE_PREFILL)) {
+                                    SLT_WRN(slot, "%s", "dflash prefill: skipped begin after unsafe prefill capture");
+                                }
+                            } else {
+                                common_speculative_set_prefill_capture_enabled(slot.spec.get(), true);
+                            }
                         }
-                        common_speculative_begin(slot.spec.get(), slot.prompt.tokens.get_text_tokens());
+                        if (begin_speculative_state) {
+                            common_speculative_begin(slot.spec.get(), slot.prompt.tokens.get_text_tokens());
+                        }
                     }
                 } else if (slot.state != SLOT_STATE_GENERATING) {
                     continue; // continue loop of slots

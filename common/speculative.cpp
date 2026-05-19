@@ -317,6 +317,10 @@ struct common_speculative_state {
     // No-op in base class. DFlash overrides to toggle llama_set_dflash_capture.
     virtual void set_prefill_capture_enabled(bool /*enabled*/) {}
 
+    // Discard unsafe DFlash cross-ring state after failed capture/flush.
+    // No-op in base class.
+    virtual void discard_dflash_state(const char * /*reason*/) {}
+
     // Mark that a suffix-prefill flush was scheduled for this speculative state.
     // No-op in base class; DFlash uses this for per-slot invariants.
     virtual void note_prefill_suffix_scheduled() {}
@@ -1580,6 +1584,26 @@ struct common_speculative_state_dflash : public common_speculative_state {
     uint32_t profile_flags = dflash_profile_flags();
     bool kv_cache_init_attempted = false;
     bool kv_cache_enabled = false;
+    bool ring_write_discarded = false;
+
+    void discard_cross_ring(const char * reason) {
+        if (reason && reason[0]) {
+            LOG_WRN("dflash: discarding cross-ring state: %s\n", reason);
+        }
+
+        ring_write_pos = 0;
+        ring_filled = 0;
+        committed_len = 0;
+        cpu_ring_valid = true;
+        prefill_flushed = false;
+        prefill_flush_called = false;
+        prefill_flush_requested = 0;
+        prefill_flush_written = 0;
+        prefill_suffix_seen = false;
+        ring_write_discarded = true;
+        cross_buf.clear();
+        llama_dflash_kv_cache_reset(ctx_dft);
+    }
 
     // Adaptive draft length tracking
     int n_low_accept = 0;
@@ -1905,6 +1929,10 @@ struct common_speculative_state_dflash : public common_speculative_state {
         }
     }
 
+    void discard_dflash_state(const char * reason) override {
+        discard_cross_ring(reason);
+    }
+
     void note_prefill_suffix_scheduled() override {
         prefill_suffix_seen = true;
     }
@@ -2122,6 +2150,12 @@ struct common_speculative_state_dflash : public common_speculative_state {
             offset,
             force_cpu_ring_for_flush,
             source);
+        if (actual_written != to_write) {
+            LOG_ERR("dflash prefill flush wrote incomplete ring span: requested=%d written=%d seq=%d; discarding DFlash state\n",
+                    to_write, actual_written, seq_id);
+            discard_cross_ring("incomplete prefill flush");
+            return 0;
+        }
         committed_len += actual_written;
         update_drafter_kv_cache(actual_written);
         prefill_flushed = true;
@@ -2632,6 +2666,7 @@ private:
     int ring_write(int n_tokens, int src_offset = 0, bool force_cpu_ring = false,
                    dflash_capture_source source = dflash_capture_source::cpu_hidden) {
         if (n_tokens <= 0) return 0;
+        ring_write_discarded = false;
 
         const bool use_prefill_gpu = (source == dflash_capture_source::prefill_gpu_hidden);
         const bool source_has_cpu_hidden = (source == dflash_capture_source::cpu_hidden);
@@ -2765,7 +2800,7 @@ private:
             }
         }
         if (gpu_d2d_failed) {
-            LOG_WRN("dflash: GPU hidden D2D ring write failed; accepted hiddens were not appended\n");
+            discard_cross_ring("GPU hidden D2D ring write failed");
             return 0;
         }
         int64_t gpu_sync_us = 0;
@@ -2901,6 +2936,9 @@ private:
         ring_filled = 0;
         llama_dflash_kv_cache_reset(ctx_dft);
         const int actual_written = ring_write(to_store, start_offset, true);
+        if (ring_write_discarded) {
+            return;
+        }
         committed_len = start_offset + actual_written;
         update_drafter_kv_cache(actual_written);
     }
@@ -2931,6 +2969,9 @@ private:
         }
 
         const int actual_written = ring_write(n_accepted);
+        if (ring_write_discarded) {
+            return;
+        }
         committed_len += actual_written;
         update_drafter_kv_cache(actual_written);
     }
@@ -3611,6 +3652,15 @@ void common_speculative_set_prefill_capture_enabled(common_speculative * spec, b
     }
     for (auto & impl : spec->impls) {
         impl->set_prefill_capture_enabled(enabled);
+    }
+}
+
+void common_speculative_discard_dflash_state(common_speculative * spec, const char * reason) {
+    if (spec == nullptr) {
+        return;
+    }
+    for (auto & impl : spec->impls) {
+        impl->discard_dflash_state(reason);
     }
 }
 
