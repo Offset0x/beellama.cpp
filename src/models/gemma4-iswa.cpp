@@ -1,5 +1,5 @@
 #include "models.h"
-
+#include "ggml.h"
 #include "llama-context.h"
 
 #include <algorithm>
@@ -21,7 +21,10 @@ llm_build_gemma4_iswa::llm_build_gemma4_iswa(const llama_model & model, const ll
     inpL = build_inp_embd(model.tok_embd);
 
     // important: do not normalize weights for raw embeddings input (i.e. encoded image emdeddings)
-    inpL = ggml_scale(ctx0, inpL, ubatch.token ? sqrtf(n_embd) : 1.0f);
+    // BF16 precision: match training-time BF16 rounding for embedding scale.
+    inpL = ggml_cast(ctx0, inpL, GGML_TYPE_BF16);
+    inpL = ggml_scale(ctx0, inpL, ubatch.token ? ggml_bf16_to_fp32(ggml_fp32_to_bf16(sqrtf(n_embd))) : 1.0f);
+    inpL = ggml_cast(ctx0, inpL, GGML_TYPE_F32);
     cb(inpL, "inp_scaled", -1);
 
     // inp_pos - contains the positions
@@ -161,8 +164,11 @@ llm_build_gemma4_iswa::llm_build_gemma4_iswa(const llama_model & model, const ll
             cb(cur_moe, "ffn_norm_2", il);
 
             // custom MoE logits calculation (router operates on attn_out, not cur)
-            ggml_tensor * tmp = ggml_rms_norm(ctx0, attn_out, hparams.f_norm_rms_eps);
-            tmp = ggml_scale(ctx0, tmp, 1.0f / sqrtf((float) n_embd));
+            // BF16 precision: match training-time BF16 rounding for router norm+scale.
+            ggml_tensor * tmp = ggml_cast(ctx0, attn_out, GGML_TYPE_BF16);
+            tmp = ggml_rms_norm(ctx0, tmp, hparams.f_norm_rms_eps);
+            tmp = ggml_scale(ctx0, tmp, 1.0f / ggml_bf16_to_fp32(ggml_fp32_to_bf16(sqrtf((float) n_embd))));
+            tmp = ggml_cast(ctx0, tmp, GGML_TYPE_F32);
             tmp = ggml_mul(ctx0, tmp, model.layers[il].ffn_gate_inp_s);
             ggml_tensor * logits = build_lora_mm(model.layers[il].ffn_gate_inp, tmp); // [n_expert, n_tokens]
             cb(logits, "ffn_moe_logits", il);
@@ -217,6 +223,7 @@ llm_build_gemma4_iswa::llm_build_gemma4_iswa(const llama_model & model, const ll
             cb(cur, "pe_in", il);
 
             cur = build_lora_mm(model.layers[il].per_layer_inp_gate, cur); // [n_embd_per_layer, n_tokens]
+            cb(cur, "per_layer_inp_gate_mm", il);
             cur = ggml_gelu(ctx0, cur);
 
             ggml_tensor * inp_this_layer = ggml_view_2d_slice(ctx0, inp_per_layer, il); // [n_embd_per_layer, n_tokens]
@@ -229,9 +236,11 @@ llm_build_gemma4_iswa::llm_build_gemma4_iswa(const llama_model & model, const ll
             if (il == n_layer - 1 && inp_out_ids) {
                 inp_this_layer = ggml_get_rows(ctx0, inp_this_layer, inp_out_ids);
             }
+            cb(inp_this_layer, "inp_this_layer", il);
 
             cur = ggml_mul(ctx0, cur, inp_this_layer);
             cur = build_lora_mm(model.layers[il].per_layer_proj, cur); // [n_embd, n_tokens]
+            cb(cur, "per_layer_proj_mm_layer", il);
             cur = build_norm(cur, model.layers[il].per_layer_post_norm, nullptr, LLM_NORM_RMS, il);
             cb(cur, "per_layer_embd_out", il);
 
@@ -386,10 +395,15 @@ ggml_tensor * llm_build_gemma4_iswa::build_inp_per_layer() {
         res->t_inp_tokens = inp->tokens;
 
         inp_per_layer = ggml_get_rows  (ctx0, model.per_layer_tok_embd, inp->tokens);
+        cb(inp_per_layer, "inp_per_layer_get_rows", -1);
         inp_per_layer = ggml_reshape_3d(ctx0, inp_per_layer, n_embd_per_layer, n_layer, n_tokens);
         cb(inp_per_layer, "inp_per_layer_reshape", -1);
-        inp_per_layer = ggml_scale     (ctx0, inp_per_layer, tok_embd_scale);
+        // BF16 precision: match training-time BF16 rounding for per-layer embedding scale.
+        inp_per_layer = ggml_cast      (ctx0, inp_per_layer, GGML_TYPE_BF16);
+        cb(inp_per_layer, "inp_per_layer_bf16", -1);
+        inp_per_layer = ggml_scale     (ctx0, inp_per_layer, ggml_bf16_to_fp32(ggml_fp32_to_bf16(tok_embd_scale)));
         cb(inp_per_layer, "inp_per_layer_scaled", -1);
+        inp_per_layer = ggml_cast      (ctx0, inp_per_layer, GGML_TYPE_F32);
         cb(inp_per_layer, "inp_per_layer_selected", -1);
 
         res->add_input(std::move(inp));
@@ -419,20 +433,28 @@ ggml_tensor * llm_build_gemma4_iswa::project_per_layer_inputs(ggml_tensor * inp_
     const float per_layer_projection_scale = 1.0f / sqrtf((float) n_embd);
     const float per_layer_input_scale      = 1.0f / sqrtf(2.0f);
 
-    // note: this matrix multiplication will be performed in the input layer (i.e. on the CPU)
+    // note: per_layer_model_proj is classified as LLM_TENSOR_LAYER_REPEATING with
+    // GGML_OP_MUL_MAT and bid=0, so it routes through the layer buffer list (GPU under
+    // -ngl all). Exact backend placement can still be affected by buffer support and
+    // overrides, so this callback helps measure the matmul independently.
     ggml_tensor * per_layer_proj;
     per_layer_proj = ggml_mul_mat   (ctx0, model.per_layer_model_proj, inp_batch);
+    cb(per_layer_proj, "per_layer_proj_mm", -1);
     per_layer_proj = ggml_scale     (ctx0, per_layer_proj, per_layer_projection_scale);
+    cb(per_layer_proj, "per_layer_proj_scaled", -1);
     per_layer_proj = ggml_reshape_3d(ctx0, per_layer_proj, n_embd_per_layer, n_layer, n_tokens);
+    cb(per_layer_proj, "per_layer_proj_reshape", -1);
 
     per_layer_proj = build_norm(per_layer_proj, model.per_layer_proj_norm, nullptr, LLM_NORM_RMS, -1);
     cb(per_layer_proj, "per_layer_proj", -1);
 
     inp_per_layer = ggml_add  (ctx0, per_layer_proj, inp_per_layer);
+    cb(inp_per_layer, "inp_per_layer_add_proj", -1);
     inp_per_layer = ggml_scale(ctx0, inp_per_layer, per_layer_input_scale);
     cb(inp_per_layer, "inp_per_layer", -1);
 
     // permute to shape: [n_embd_per_layer, n_tokens, n_layer]
     inp_per_layer = ggml_cont(ctx0, ggml_permute(ctx0, inp_per_layer, 0, 2, 1, 3));
+    cb(inp_per_layer, "inp_per_layer_permute_cont", -1);
     return inp_per_layer;
 }
