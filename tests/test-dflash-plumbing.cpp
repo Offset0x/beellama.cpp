@@ -84,6 +84,7 @@ int main(int argc, char ** argv) {
     const std::string qwen35moe = read_file(root + "/src/models/qwen35moe.cpp");
     const std::string gemma4_iswa = read_file(root + "/src/models/gemma4.cpp");
     const std::string convert_py = read_file(root + "/convert_hf_to_gguf.py");
+    const std::string dflash_conversion = read_file(root + "/conversion/dflash.py");
     const std::string graph_h = read_file(root + "/src/llama-graph.h");
     const std::string model_cpp = read_file(root + "/src/llama-model.cpp");
     const std::string cuda_ring = read_file(root + "/ggml/src/ggml-cuda/cross-ring-interleave.cu");
@@ -206,6 +207,8 @@ int main(int argc, char ** argv) {
         "CUDA template generator must preserve D=512 quantized FlashAttention vector instances");
     ok &= expect(arch_cpp.find("{ LLM_ARCH_DFLASH,") != std::string::npos,
         "upstream dflash architecture must be registered separately");
+    ok &= expect(convert_py.find("from conversion import") != std::string::npos,
+        "converter wrapper must keep using the upstream modular conversion package");
     ok &= expect(arch_cpp.find("{ LLM_ARCH_DFLASH,           \"dflash\"") != std::string::npos &&
                  arch_cpp.find("{ LLM_ARCH_DFLASH_DRAFT,     \"dflash-draft\"") != std::string::npos,
         "upstream and Bee DFlash architecture names must both be recognized");
@@ -646,9 +649,9 @@ int main(int argc, char ** argv) {
         "DFlash drafter input must reject cross feature-size mismatches");
     ok &= expect(dflash_draft.find("ggml_backend_tensor_memset(target_hidden, 0, 0, tensor_bytes)") != std::string::npos,
         "DFlash drafter input must zero target_hidden on invalid or missing cross data");
-    ok &= expect(convert_py.find("DFlashDraftModel: missing") != std::string::npos,
+    ok &= expect(dflash_conversion.find("DFlashDraftModel: missing") != std::string::npos,
         "DFlash converter must warn when using default metadata");
-    ok &= expect(convert_py.find("DFlashDraftModel metadata:") != std::string::npos,
+    ok &= expect(dflash_conversion.find("DFlashDraftModel metadata:") != std::string::npos,
         "DFlash converter must print DFlash metadata summary");
     // --- PR8 checks: DFlash runtime diagnostics, shape validation, env toggles, CUDA debug ---
     ok &= expect(speculative.find("GGML_DFLASH_FORCE_CPU_CROSS") != std::string::npos,
@@ -810,11 +813,11 @@ int main(int argc, char ** argv) {
     ok &= expect(server_context.find("const bool all_accepted_flat = (n_accepted_draft == (int) n_draft) && !had_dflash_padding") != std::string::npos, "DFlash verifier padding must force rollback even when all real draft tokens were accepted");
 
     // DFlashDraftModel converter vocab path checks
-    ok &= expect(convert_py.find("_is_gemma4_dflash") != std::string::npos, "DFlash converter must have Gemma4 detection helper");
-    ok &= expect(convert_py.find("_set_vocab_gemma4_hf_bpe") != std::string::npos, "DFlash converter must have Gemma4 HF/BPE vocab helper");
-    ok &= expect(convert_py.find("visible_tokens = {") != std::string::npos, "DFlash Gemma4 vocab helper must define visible tokens set");
-    ok &= expect(convert_py.find("errors=\"replace\"") != std::string::npos, "DFlash Gemma4 vocab helper must decode tokens with errors=replace");
-    ok &= expect(convert_py.find("self._set_vocab_gpt2()") != std::string::npos, "DFlash converter must fall back to GPT-2 vocab for non-Gemma drafters");
+    ok &= expect(dflash_conversion.find("_is_gemma4_dflash") != std::string::npos, "DFlash converter must have Gemma4 detection helper");
+    ok &= expect(dflash_conversion.find("_set_vocab_gemma4_hf_bpe") != std::string::npos, "DFlash converter must have Gemma4 HF/BPE vocab helper");
+    ok &= expect(dflash_conversion.find("visible_tokens = {") != std::string::npos, "DFlash Gemma4 vocab helper must define visible tokens set");
+    ok &= expect(dflash_conversion.find("errors=\"replace\"") != std::string::npos, "DFlash Gemma4 vocab helper must decode tokens with errors=replace");
+    ok &= expect(dflash_conversion.find("self._set_vocab_gpt2()") != std::string::npos, "DFlash converter must fall back to GPT-2 vocab for non-Gemma drafters");
 
     ok &= expect(server_context.find("should_flush_dflash_prefill") != std::string::npos,
         "server must gate DFlash prefill flushes to the useful suffix");
