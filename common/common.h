@@ -166,6 +166,10 @@ enum common_speculative_type {
     COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V, // self-speculative decoding with n-gram keys and 4 m-gram values
     COMMON_SPECULATIVE_TYPE_NGRAM_MOD,
     COMMON_SPECULATIVE_TYPE_NGRAM_CACHE,   // self-speculative decoding with 3-level n-gram cache
+    COMMON_SPECULATIVE_TYPE_SUFFIX,        // model-free suffix tree speculative decoding
+    COMMON_SPECULATIVE_TYPE_COPYSPEC,      // model-free copy-from-context speculative decoding
+    COMMON_SPECULATIVE_TYPE_RECYCLE,       // model-free token recycling (adjacency matrix)
+    COMMON_SPECULATIVE_TYPE_DFLASH,        // DFlash block-diffusion speculative decoding
     COMMON_SPECULATIVE_TYPE_COUNT          // number of types, unknown type
 };
 
@@ -277,6 +281,7 @@ struct common_params_sampling {
     std::vector<llama_token> reasoning_budget_end;             // end tag token sequence
     std::vector<llama_token> reasoning_budget_forced;          // forced sequence (message + end tag)
     std::string              reasoning_budget_message;         // message injected before end tag when budget exhausted
+    bool                     reasoning_budget_tracking = false; // track reasoning state even with unlimited budget
 
     bool backend_sampling = false;
 
@@ -323,6 +328,12 @@ struct common_params_speculative_draft {
     std::vector<ggml_backend_dev_t> devices; // devices to use for offloading
 
     std::vector<llama_model_tensor_buft_override> tensor_buft_overrides;
+
+    // fork: drafter context size override (0 = use model default)
+    int32_t n_ctx = 0;
+
+    // fork: string replacements for cross-model compat
+    std::vector<std::pair<std::string, std::string>> replacements;
 };
 
 struct common_params_speculative_ngram_mod {
@@ -343,6 +354,11 @@ struct common_params_speculative_ngram_cache {
     std::string lookup_cache_dynamic; // path of dynamic ngram cache file for lookup decoding
 };
 
+enum common_speculative_dm_controller {
+    COMMON_SPECULATIVE_DM_CONTROLLER_FRINGE,
+    COMMON_SPECULATIVE_DM_CONTROLLER_PROFIT,
+};
+
 struct common_params_speculative {
     std::vector<enum common_speculative_type> types = { COMMON_SPECULATIVE_TYPE_NONE };
 
@@ -356,16 +372,79 @@ struct common_params_speculative {
 
     common_params_speculative_ngram_cache ngram_cache;
 
+    // DFlash-specific params (top-level for fork compat)
+    int32_t n_max        = 16; // maximum number of tokens to draft during speculative decoding
+    int32_t n_max_base   = 0;  // user's original --draft-max before adaptive DM reduction (0 = use n_max)
+    int32_t n_min        = 0;  // minimum number of draft tokens to use for speculative decoding
+    int32_t branch_budget = 0; // DDTree branch nodes beyond the main draft path (0 = flat DFlash)
+    int32_t tree_budget   = -1; // legacy total-node --tree-budget input; normalized after parsing
+    bool    branch_budget_explicit = false;
+    bool    legacy_tree_budget_explicit = false;
+    int32_t dflash_max_slots = 1; // max concurrent server slots that keep DFlash state
+    float   p_split = 0.1f;   // speculative decoding split probability
+    float   p_min   = 0.0f;   // minimum speculative decoding probability (0 = disabled)
+    float   sample_temp = 0.0f; // drafter sampling temperature (0 = greedy, >0 = Gumbel sampling)
+    int32_t draft_topk  = 1;   // top-K candidates per drafter position (1 = argmax only)
+    int32_t dflash_cross_ctx = 512; // DFlash cross-attention window in target hidden-state tokens
+
+    // adaptive draft-max management
+    bool    dm_adaptive         = true;  // enable adaptive draft-max
+    float   dm_fringe_min       = 0.30f; // fringe below this turns DFlash off after off-dwell
+    float   dm_fringe_max       = 0.50f; // fringe above this restores full base n_max
+    int32_t dm_off_dwell        = 8;     // consecutive weak cycles before going off
+    int32_t dm_explore_interval = 12;    // cycles between exploration drafts
+    int32_t dm_min_reach        = 3;     // fringe controller: min current-epoch samples before promotion
+    int32_t dm_probe_interval   = 16;    // cycles to wait before probing at n_max=0
+    float   dm_probe_fraction   = 0.25f; // fraction of base n_max to use as probe when disabled
+    int32_t dm_fringe_window    = 3;     // fringe controller: trailing positions to average over
+    common_speculative_dm_controller dm_controller = COMMON_SPECULATIVE_DM_CONTROLLER_PROFIT;
+    float   dm_profit_min          = 0.05f;
+    float   dm_profit_raise_margin = 0.05f;
+    float   dm_profit_lower_margin = 0.05f;
+    float   dm_profit_ewma_alpha   = 0.15f;
+    int32_t dm_profit_min_samples  = 3;
+    int32_t dm_profit_warmup       = 0;
+    int32_t dm_profit_baseline_interval = 1024;
+
+    // DFlash draft model (separate from upstream's draft.model)
+    struct common_params_model mparams_dft;
+    llama_model * model_dft = nullptr;
+    llama_context_params cparams_dft;
+
+    // copyspec: copy from context
+    int32_t copyspec_gamma      = 6;    // window size for rolling hash match
+
+    // token recycling: adjacency matrix
+    int32_t recycle_k            = 8;    // top-k successors per token
+
+    // suffix tree speculative decoding
+    int32_t suffix_max_depth    = 64;   // maximum depth of suffix tree
+    float   suffix_spec_factor  = 2.0f; // max_spec = factor * match_len + offset
+    float   suffix_spec_offset  = 0.0f; // additive offset for max speculative tokens
+    float   suffix_min_prob     = 0.1f; // prune branches below this probability
+
     bool has_dft() const {
         return !draft.mparams.path.empty() || !draft.mparams.hf_repo.empty();
     }
 
-    uint32_t need_n_rs_seq() const {
-        bool needs_rs_seq = std::any_of(types.begin(), types.end(), [&](auto t) {
-            return t == COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
-        });
+    bool has_type(common_speculative_type t) const {
+        return std::find(types.begin(), types.end(), t) != types.end();
+    }
 
-        return needs_rs_seq ? draft.n_max : 0u;
+    // fork: single-type compat helper (most fork code checks one type at a time)
+    common_speculative_type type() const {
+        if (types.empty() || (types.size() == 1 && types[0] == COMMON_SPECULATIVE_TYPE_NONE)) {
+            return COMMON_SPECULATIVE_TYPE_NONE;
+        }
+        return types.back();
+    }
+
+    void set_type(common_speculative_type t) {
+        types = { t };
+    }
+
+    uint32_t need_n_rs_seq() const {
+        return has_type(COMMON_SPECULATIVE_TYPE_DRAFT_MTP) ? draft.n_max : 0u;
     }
 };
 
@@ -401,6 +480,22 @@ enum common_reasoning_format {
     // do not extend this enum unless you absolutely have to
     // in most cases, use COMMON_REASONING_FORMAT_AUTO
     // see: https://github.com/ggml-org/llama.cpp/pull/15408
+};
+
+enum common_reasoning_loop_guard_mode {
+    COMMON_REASONING_LOOP_GUARD_OFF,
+    COMMON_REASONING_LOOP_GUARD_FORCE_CLOSE,
+    COMMON_REASONING_LOOP_GUARD_STOP,
+};
+
+struct common_reasoning_loop_guard_params {
+    common_reasoning_loop_guard_mode mode = COMMON_REASONING_LOOP_GUARD_FORCE_CLOSE;
+    int32_t min_reasoning_tokens = 1024;
+    int32_t window_tokens = 2048;
+    int32_t max_period = 512;
+    int32_t min_repeated_coverage = 768;
+    int32_t check_interval = 32;
+    int32_t interventions_max = 1;
 };
 
 
@@ -453,7 +548,7 @@ struct common_params {
     int32_t fit_params_min_ctx = 4096;  // minimum context size to set when trying to reduce memory use
 
     // margin per device in bytes for fitting parameters to free memory:
-    std::vector<size_t> fit_params_target = std::vector<size_t>(llama_max_devices(), 1024 * 1024*1024);
+    std::vector<size_t> fit_params_target = std::vector<size_t>(std::max<size_t>(llama_max_devices(), 1), 1024 * 1024*1024);
 
     enum llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER; // how to split the model across GPUs
 
@@ -469,9 +564,11 @@ struct common_params {
     enum llama_pooling_type      pooling_type      = LLAMA_POOLING_TYPE_UNSPECIFIED; // pooling type for embeddings
     enum llama_attention_type    attention_type    = LLAMA_ATTENTION_TYPE_UNSPECIFIED; // attention type for embeddings
     enum llama_flash_attn_type   flash_attn_type   = LLAMA_FLASH_ATTN_TYPE_AUTO; // whether to use Flash Attention
+    bool no_fused_gdn = false;
 
     struct common_params_sampling    sampling;
     struct common_params_speculative speculative;
+    common_reasoning_loop_guard_params reasoning_loop_guard;
     struct common_params_vocoder     vocoder;
     struct common_params_diffusion   diffusion;
 
@@ -567,6 +664,7 @@ struct common_params {
     // multimodal models (see tools/mtmd)
     struct common_params_model mmproj;
     bool mmproj_use_gpu = true;     // use GPU for multimodal model
+    bool mmproj_gpu_swap = false;   // swap MTP↔mmproj VRAM on vision requests
     bool no_mmproj = false;         // explicitly disable multimodal model
     std::vector<std::string> image; // path to image file(s)
     int image_min_tokens = -1;
@@ -1059,6 +1157,7 @@ struct common_prompt_checkpoint {
 
     std::vector<uint8_t> data_tgt;
     std::vector<uint8_t> data_dft;
+    std::vector<uint8_t> ring_data; // fork: DFlash ring buffer state
 
     size_t size() const;
 

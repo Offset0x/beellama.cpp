@@ -132,7 +132,99 @@ int main(void) {
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SPECULATIVE));
     assert(params.speculative.draft.n_max == 123);
 
+    argv = {"binary_name", "--spec-dm-min-reach", "6"};
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+    assert(params.speculative.dm_min_reach == 6);
+
+    params = common_params();
+    assert(params.speculative.draft.p_min == 0.0f);
+    assert(params.speculative.p_min == 0.0f);
+    assert(params.speculative.dm_profit_min == 0.05f);
+    assert(params.speculative.dm_profit_raise_margin == 0.05f);
+    assert(params.speculative.dm_profit_lower_margin == 0.05f);
+    assert(params.speculative.dm_controller == COMMON_SPECULATIVE_DM_CONTROLLER_PROFIT);
+    assert(params.speculative.dm_profit_min_samples == 3);
+    assert(params.speculative.dm_profit_warmup == 0);
+    assert(params.speculative.dm_profit_baseline_interval == 1024);
+    assert(!params.fit_params_target.empty());
+
+    argv = {"binary_name", "-m", "model_file.gguf", "--fit-target", "256"};
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
+    for (size_t target : params.fit_params_target) {
+        assert(target == 256ull * 1024ull * 1024ull);
+    }
+
+    argv = {"binary_name", "--spec-draft-p-min", "0"};
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+    assert(params.speculative.draft.p_min == 0.0f);
+    assert(params.speculative.p_min == 0.0f);
+
+    argv = {"binary_name", "--draft-p-min", "0.25"};
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+    assert(params.speculative.draft.p_min == 0.25f);
+    assert(params.speculative.p_min == 0.25f);
+
+    argv = {
+        "binary_name",
+        "--spec-dm-controller", "fringe",
+    };
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+    assert(params.speculative.dm_controller == COMMON_SPECULATIVE_DM_CONTROLLER_FRINGE);
+
+    argv = {
+        "binary_name",
+        "--spec-dm-controller", "profit",
+        "--spec-dm-profit-min", "0.03",
+        "--spec-dm-profit-raise-margin", "0.06",
+        "--spec-dm-profit-lower-margin", "0.02",
+        "--spec-dm-profit-ewma-alpha", "0.15",
+        "--spec-dm-profit-min-samples", "6",
+        "--spec-dm-profit-warmup", "4",
+        "--spec-dm-profit-baseline-interval", "256",
+    };
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+    assert(params.speculative.dm_controller == COMMON_SPECULATIVE_DM_CONTROLLER_PROFIT);
+    assert(params.speculative.dm_profit_min == 0.03f);
+    assert(params.speculative.dm_profit_raise_margin == 0.06f);
+    assert(params.speculative.dm_profit_lower_margin == 0.02f);
+    assert(params.speculative.dm_profit_ewma_alpha == 0.15f);
+    assert(params.speculative.dm_profit_min_samples == 6);
+    assert(params.speculative.dm_profit_warmup == 4);
+    assert(params.speculative.dm_profit_baseline_interval == 256);
+
+    argv = {"binary_name", "--spec-dm-controller", std::string("profit-") + "shadow"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+
+    argv = {"binary_name", "--spec-dm-controller", "invalid"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+
+    argv = {
+        "binary_name",
+        "--reasoning-loop-guard", "force-close",
+        "--reasoning-loop-min-tokens", "1024",
+        "--reasoning-loop-window", "2048",
+        "--reasoning-loop-max-period", "512",
+        "--reasoning-loop-min-coverage", "768",
+        "--reasoning-loop-check-interval", "32",
+        "--reasoning-loop-interventions", "1",
+    };
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+    assert(params.reasoning_loop_guard.mode == COMMON_REASONING_LOOP_GUARD_FORCE_CLOSE);
+    assert(params.reasoning_loop_guard.min_reasoning_tokens == 1024);
+    assert(params.reasoning_loop_guard.window_tokens == 2048);
+    assert(params.reasoning_loop_guard.max_period == 512);
+    assert(params.reasoning_loop_guard.min_repeated_coverage == 768);
+    assert(params.reasoning_loop_guard.check_interval == 32);
+    assert(params.reasoning_loop_guard.interventions_max == 1);
+
+    argv = {"binary_name", "--reasoning-loop-guard", "invalid"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+
+    argv = {"binary_name", "--reasoning-loop-window", "64", "--reasoning-loop-min-coverage", "128"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+
     // multi-value args (CSV)
+    params.model.path = "model_file.gguf";
     argv = {"binary_name", "--lora", "file1.gguf,\"file2,2.gguf\",\"file3\"\"3\"\".gguf\",file4\".gguf"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.lora_adapters.size() == 4);
@@ -178,6 +270,10 @@ int main(void) {
 #endif // _WIN32
 
     printf("test-arg-parser: test download functions\n\n");
+    common_download_model_result download_result_fields;
+    download_result_fields.dflash_draft_path = "dflash-draft.gguf";
+    assert(download_result_fields.dflash_draft_path == "dflash-draft.gguf");
+
     const char * GOOD_URL = "http://ggml.ai/";
     const char * BAD_URL  = "http://ggml.ai/404";
 
