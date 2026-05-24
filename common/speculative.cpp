@@ -806,6 +806,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         // TODO:this is generally true, but would be nice to assert it
         {
             const float * h_tgt = llama_get_embeddings_pre_norm(ctx_tgt);
+            if (h_tgt == nullptr) {
+                LOG_ERR("%s: target pre-norm embeddings are not available\n", __func__);
+                return false;
+            }
             std::memcpy(batch.embd + (size_t) 1 * n_embd, h_tgt, row_bytes * (n_tokens-1));
 
             //{
@@ -848,6 +852,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
             for (int32_t i = 0; i < n_rows; ++i) {
                 const float * h = llama_get_embeddings_pre_norm_ith(ctx_tgt, i_batch_beg[seq_id] + i);
+                if (h == nullptr) {
+                    LOG_ERR("%s: target pre-norm embedding row %d is not available\n",
+                            __func__, (int) (i_batch_beg[seq_id] + i));
+                    return false;
+                }
                 std::memcpy(verify_h[seq_id].data() + (size_t) i * n_embd, h, row_bytes);
             }
 
@@ -914,6 +923,14 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
                 common_sampler_sample(smpl, ctx_dft, i_batch, true);
                 h_row = llama_get_embeddings_pre_norm_ith(ctx_dft, i_batch);
+                if (h_row == nullptr) {
+                    LOG_WRN("%s: draft pre-norm embedding row %d is not available; stopping MTP draft for seq_id=%d\n",
+                            __func__, i_batch, (int) seq_id);
+                    drafting[seq_id] = false;
+                    n_drafting--;
+                    ++i_batch;
+                    continue;
+                }
                 ++i_batch;
 
                 const auto * cur_p = common_sampler_get_candidates(smpl, true);

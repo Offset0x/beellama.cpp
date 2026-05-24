@@ -311,6 +311,7 @@ llama_context::llama_context(
             /*.type_k   =*/ params.type_k,
             /*.type_v   =*/ params.type_v,
             /*.swa_full =*/ params.swa_full,
+            /*.ctx_type =*/ cparams.ctx_type,
         };
 
         memory.reset(model.create_memory(params_mem, cparams));
@@ -5603,7 +5604,9 @@ static bool needs_raw_logits(const llama_ubatch & ubatch, const std::map<llama_s
 }
 
 int llama_context::decode(const llama_batch & batch_inp) {
-    GGML_ASSERT((!batch_inp.token && batch_inp.embd) || (batch_inp.token && !batch_inp.embd)); // NOLINT
+    const bool has_token = batch_inp.token != nullptr;
+    const bool has_embd  = batch_inp.embd  != nullptr;
+    GGML_ASSERT((has_token != has_embd) || (cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP && has_token && has_embd)); // NOLINT
 
     if (!memory) {
         LLAMA_LOG_DEBUG("%s: cannot decode batches with this context (calling encode() instead)\n", __func__);
@@ -5744,6 +5747,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
     };
 
     int64_t n_outputs_prev = 0;
+    int64_t n_tokens_prev  = 0;
 
     // DFlash: reset hidden-state capture so this decode()'s eval callback
     // accumulates across ubatches (prefill with n_tokens > n_ubatch would
@@ -6201,8 +6205,9 @@ int llama_context::decode(const llama_batch & batch_inp) {
         //    ggml_graph_dump_dot(gf, NULL, "llama.dot");
         //}
 
-        auto * t_logits = res->get_logits();
-        auto * t_embd   = cparams.embeddings ? res->get_embd() : nullptr;
+        auto * t_logits     = res->get_logits();
+        auto * t_embd       = cparams.embeddings ? res->get_embd() : nullptr;
+        auto * t_h_pre_norm = res->get_h_pre_norm();
 
         // After successful graph compute, update prefill plan accounting for
         // the intersection tokens that were graph-copied into prefill_gpu.
@@ -6366,6 +6371,30 @@ int llama_context::decode(const llama_batch & batch_inp) {
             }
         }
 
+        // Extract pre-norm hidden states for MTP-style draft contexts. Unmasked
+        // callers need one row per raw input token, while masked callers keep
+        // only rows that produced outputs/logits.
+        if (embd_pre_norm.data && t_h_pre_norm) {
+            ggml_backend_t backend_h = ggml_backend_sched_get_tensor_backend(sched.get(), t_h_pre_norm);
+            GGML_ASSERT(backend_h != nullptr);
+
+            const uint32_t n_embd = hparams.n_embd;
+
+            if (!cparams.embeddings_pre_norm_masked) {
+                GGML_ASSERT(n_tokens_prev + ubatch.n_tokens <= (int64_t) cparams.n_batch);
+                GGML_ASSERT((n_tokens_prev + ubatch.n_tokens)*n_embd <= (int64_t) embd_pre_norm.size);
+
+                float * h_out = embd_pre_norm.data + n_tokens_prev*n_embd;
+                ggml_backend_tensor_get_async(backend_h, t_h_pre_norm, h_out, 0, ubatch.n_tokens*n_embd*sizeof(float));
+            } else if (n_outputs > 0) {
+                GGML_ASSERT(n_outputs_prev + n_outputs <= n_outputs_all);
+                GGML_ASSERT((n_outputs_prev + n_outputs)*n_embd <= (int64_t) embd_pre_norm.size);
+
+                float * h_out = embd_pre_norm.data + n_outputs_prev*n_embd;
+                ggml_backend_tensor_get_async(backend_h, t_h_pre_norm, h_out, 0, n_outputs*n_embd*sizeof(float));
+            }
+        }
+
         // Copy backend sampling output if this ubatch produced any sampling tensors.
         if (has_samplers && (!res->t_sampled.empty() || !res->t_sampled_probs.empty() || !res->t_sampled_logits.empty())) {
             const auto seq_to_output_row = build_seq_to_output_row(ubatch, n_outputs_prev);
@@ -6383,6 +6412,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
         // (dflash_eval_callback) — no post-graph readback needed here
 
         n_outputs_prev += n_outputs;
+        n_tokens_prev  += ubatch.n_tokens;
     } while (mctx->next());
 
     // set to total number of outputs in the batch, for use in llama_get_logits_ith
@@ -6613,6 +6643,12 @@ void llama_context::output_reorder() {
             }
         }
 
+        if (embd_pre_norm.size > 0 && cparams.embeddings_pre_norm_masked) {
+            for (uint64_t k = 0; k < n_embd; k++) {
+                std::swap(embd_pre_norm.data[i0*n_embd + k], embd_pre_norm.data[i1*n_embd + k]);
+            }
+        }
+
         if (!logits_argmax_buf.empty()) {
             for (int32_t k = 0; k < logits_argmax_k; ++k) {
                 std::swap(logits_argmax_buf[i0*logits_argmax_k + k], logits_argmax_buf[i1*logits_argmax_k + k]);
@@ -6712,7 +6748,7 @@ ggml_cgraph * llama_context::graph_reserve(
 
     auto * res = gf_res_reserve.get();
 
-    const auto gparams = graph_params(res, ubatch, mctx, LLM_GRAPH_TYPE_DEFAULT);
+    const auto gparams = graph_params(res, ubatch, mctx, ctx_type_to_graph_type(cparams.ctx_type));
 
     res->reset();
 

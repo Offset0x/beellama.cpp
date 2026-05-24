@@ -1731,6 +1731,13 @@ private:
         return llama_init_from_model(model_tgt, cparams);
     }
 
+    void mark_mtp_draft_context_seq_rm_supported() {
+        // common_context_can_seq_rm() probes support with a token-only dummy
+        // decode. MTP draft contexts consume target hidden-state/token pairs,
+        // so that probe is not a valid workload for this context type.
+        ctx_dft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_PART;
+    }
+
     void swap_mtp_to_mmproj_gpu() {
         SRV_INF("%s", "swapping MTP out, loading mmproj to GPU...\n");
         int64_t t0 = ggml_time_us();
@@ -1768,7 +1775,7 @@ private:
             return;
         }
 
-        ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());
+        mark_mtp_draft_context_seq_rm_supported();
         params_base.speculative.draft.ctx_tgt = ctx_tgt;
         params_base.speculative.draft.ctx_dft = ctx_dft.get();
 
@@ -2078,7 +2085,7 @@ private:
                 cparams.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
                 cparams.n_rs_seq = 0;
                 ctx_dft.reset(llama_init_from_model(model_dft.get(), cparams));
-                ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());
+                mark_mtp_draft_context_seq_rm_supported();
                 params_base.speculative.draft.ctx_tgt = ctx_tgt;
                 params_base.speculative.draft.ctx_dft = ctx_dft.get();
             } else if (params_base.speculative.type() != COMMON_SPECULATIVE_TYPE_DFLASH) {
@@ -2103,7 +2110,7 @@ private:
                 return false;
             }
 
-            ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());
+            mark_mtp_draft_context_seq_rm_supported();
 
             params_base.speculative.draft.ctx_tgt = ctx_tgt;
             params_base.speculative.draft.ctx_dft = ctx_dft.get();

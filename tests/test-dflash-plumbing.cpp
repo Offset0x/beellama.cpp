@@ -159,6 +159,10 @@ int main(int argc, char ** argv) {
                      cache_prompt_gate < checkpoint_memory_gate,
             "server must not create context checkpoints for requests that explicitly disable prompt caching");
     }
+    ok &= expect(server_context.find("mark_mtp_draft_context_seq_rm_supported()") != std::string::npos &&
+                 server_context.find("MTP draft contexts consume target hidden-state/token pairs") != std::string::npos &&
+                 count_occurrences(server_context, "ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());") == 1,
+        "server must not run token-only sequence-removal probes against MTP draft contexts");
 
     const size_t pretranspose = qwen35moe.find("\"qkv_mixed_pretranspose\"");
     const size_t transpose    = qwen35moe.find("qkv_mixed = ggml_transpose(ctx0, qkv_mixed)");
@@ -180,6 +184,20 @@ int main(int argc, char ** argv) {
                  count_occurrences(context_cpp, "dflash_gpu_hidden_span_in_bounds(") >= 3 &&
                  context_cpp.find("src_offset_bytes + n_bytes <= ggml_nbytes(tensor)") != std::string::npos,
         "DFlash GPU hidden ring writes must byte-check tensor spans before D2D/readback to avoid backend read OOB asserts");
+    ok &= expect(context_cpp.find("cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP && has_token && has_embd") != std::string::npos,
+        "decode must allow MTP draft batches to carry both token ids and target hidden embeddings");
+    ok &= expect(context_cpp.find("/*.ctx_type =*/ cparams.ctx_type") != std::string::npos,
+        "context creation must propagate ctx_type into memory creation so MTP uses its MTP-only KV cache");
+    ok &= expect(context_cpp.find("graph_params(res, ubatch, mctx, ctx_type_to_graph_type(cparams.ctx_type))") != std::string::npos,
+        "graph reservation must use the active context graph type so MTP reserves the MTP graph");
+    ok &= expect(context_cpp.find("auto * t_h_pre_norm = res->get_h_pre_norm();") != std::string::npos &&
+                 context_cpp.find("n_tokens_prev") != std::string::npos &&
+                 context_cpp.find("ggml_backend_tensor_get_async(backend_h, t_h_pre_norm") != std::string::npos &&
+                 context_cpp.find("embd_pre_norm.size > 0 && cparams.embeddings_pre_norm_masked") != std::string::npos,
+        "decode must copy pre-norm hidden graph outputs for MTP target and draft contexts");
+    ok &= expect(speculative.find("target pre-norm embeddings are not available") != std::string::npos &&
+                 speculative.find("draft pre-norm embedding row") != std::string::npos,
+        "MTP speculation must fail cleanly if required pre-norm hidden rows are unavailable");
     ok &= expect(context_cpp.find("get_tensor_data(gpu_layer->qkv") != std::string::npos, "conv rebuild must read QKV from GPU tape through placement-safe tensor access");
     ok &= expect(graph_cpp.find("t_logits_argmax = nullptr;") != std::string::npos, "graph reset must clear reduced logits output pointer");
     ok &= expect(graph_cpp.find("params.cparams.embeddings_pre_norm && t_h_pre_norm != nullptr") != std::string::npos ||
