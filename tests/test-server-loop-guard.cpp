@@ -1,4 +1,6 @@
 #include "../tools/server/server-loop-guard.h"
+#include "../tools/server/server-task.h"
+#include "chat-peg-parser.h"
 
 #undef NDEBUG
 #include <cassert>
@@ -40,7 +42,138 @@ static void assert_not_triggered(const server_loop_guard_result & result) {
     assert(!result.triggered);
 }
 
+static void test_task_result_state_suppresses_prefilled_thinking_close_tag() {
+    const std::string think_start = "<think>";
+    const std::string think_end = "</think>";
+
+    common_chat_parser_params parser_params;
+    parser_params.reasoning_format = COMMON_REASONING_FORMAT_NONE;
+    parser_params.generation_prompt = think_start;
+    parser_params.thinking_start_tag = think_start;
+    parser_params.thinking_end_tag = think_end;
+    parser_params.parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
+        return p.literal(think_start) + p.content(p.rest()) + p.end();
+    });
+
+    task_result_state state(parser_params);
+    std::vector<common_chat_msg_diff> diffs;
+
+    for (size_t i = 0; i < think_end.size(); ++i) {
+        diffs.clear();
+        state.update_chat_msg(think_end.substr(i, 1), i + 1 < think_end.size(), diffs, false);
+        assert(diffs.empty());
+        assert(state.chat_msg.content.empty());
+        assert(state.chat_msg.reasoning_content.empty());
+    }
+
+    diffs.clear();
+    state.update_chat_msg("\nSession title", false, diffs, false);
+    assert(state.chat_msg.content == "Session title");
+    assert(diffs.size() == 1);
+    assert(diffs[0].content_delta == "Session title");
+}
+
+static void test_task_result_state_suppresses_generated_thinking_block_in_content_mode() {
+    const std::string think_start = "<think>";
+    const std::string think_end = "</think>";
+
+    common_chat_parser_params parser_params;
+    parser_params.reasoning_format = COMMON_REASONING_FORMAT_NONE;
+    parser_params.generation_prompt = think_start;
+    parser_params.thinking_start_tag = think_start;
+    parser_params.thinking_end_tag = think_end;
+    parser_params.parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
+        return p.literal(think_start) + p.content(p.rest()) + p.end();
+    });
+
+    task_result_state state(parser_params);
+    std::vector<common_chat_msg_diff> diffs;
+
+    const std::string generated_reasoning = think_start + "\ninternal reasoning";
+    for (size_t i = 0; i < generated_reasoning.size(); ++i) {
+        diffs.clear();
+        state.update_chat_msg(generated_reasoning.substr(i, 1), true, diffs, false);
+        assert(diffs.empty());
+        assert(state.chat_msg.content.empty());
+        assert(state.chat_msg.reasoning_content.empty());
+    }
+
+    diffs.clear();
+    state.update_chat_msg(think_end + "\nSession title", false, diffs, false);
+    assert(state.chat_msg.content == "Session title");
+    assert(diffs.size() == 1);
+    assert(diffs[0].content_delta == "Session title");
+}
+
+static void test_task_result_state_suppresses_prefilled_open_thinking_content() {
+    const std::string think_start = "<think>";
+    const std::string think_end = "</think>";
+
+    common_chat_parser_params parser_params;
+    parser_params.reasoning_format = COMMON_REASONING_FORMAT_NONE;
+    parser_params.generation_prompt = think_start;
+    parser_params.thinking_start_tag = think_start;
+    parser_params.thinking_end_tag = think_end;
+    parser_params.parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
+        return p.content(p.rest()) + p.end();
+    });
+
+    task_result_state state(parser_params);
+    std::vector<common_chat_msg_diff> diffs;
+
+    const std::string generated_reasoning = "\ninternal reasoning";
+    for (size_t i = 0; i < generated_reasoning.size(); ++i) {
+        diffs.clear();
+        state.update_chat_msg(generated_reasoning.substr(i, 1), true, diffs, false);
+        assert(diffs.empty());
+        assert(state.chat_msg.content.empty());
+        assert(state.chat_msg.reasoning_content.empty());
+    }
+
+    diffs.clear();
+    state.update_chat_msg(think_end + "\nSession title", false, diffs, false);
+    assert(state.chat_msg.content == "Session title");
+    assert(diffs.size() == 1);
+    assert(diffs[0].content_delta == "Session title");
+}
+
+static void test_task_result_state_suppresses_leading_thinking_block_without_prefill() {
+    const std::string think_start = "<think>";
+    const std::string think_end = "</think>";
+
+    common_chat_parser_params parser_params;
+    parser_params.reasoning_format = COMMON_REASONING_FORMAT_NONE;
+    parser_params.thinking_start_tag = think_start;
+    parser_params.thinking_end_tag = think_end;
+    parser_params.parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
+        return p.content(p.rest()) + p.end();
+    });
+
+    task_result_state state(parser_params);
+    std::vector<common_chat_msg_diff> diffs;
+
+    const std::string generated_reasoning = think_start + "\ninternal reasoning";
+    for (size_t i = 0; i < generated_reasoning.size(); ++i) {
+        diffs.clear();
+        state.update_chat_msg(generated_reasoning.substr(i, 1), true, diffs, false);
+        assert(diffs.empty());
+        assert(state.chat_msg.content.empty());
+        assert(state.chat_msg.reasoning_content.empty());
+    }
+
+    diffs.clear();
+    state.update_chat_msg(think_end + "\nSession title", false, diffs, false);
+    assert(state.chat_msg.content == "Session title");
+    assert(diffs.size() == 1);
+    assert(diffs[0].content_delta == "Session title");
+}
+
 int main() {
+    test_task_result_state_suppresses_prefilled_thinking_close_tag();
+    test_task_result_state_suppresses_generated_thinking_block_in_content_mode();
+    test_task_result_state_suppresses_prefilled_open_thinking_content();
+    test_task_result_state_suppresses_leading_thinking_block_without_prefill();
+
     {
         server_loop_guard guard(test_params());
         accept_many(guard, std::vector<llama_token>(1200, 42), SERVER_LOOP_REGION_REASONING);

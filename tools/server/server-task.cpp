@@ -134,6 +134,8 @@ json task_params::to_json(bool only_metrics) const {
             {"reasoning_loop_interventions", reasoning_loop_guard.interventions_max},
             {"reasoning_in_content",      chat_parser_params.reasoning_in_content},
             {"generation_prompt",         chat_parser_params.generation_prompt},
+            {"thinking_start_tag",        chat_parser_params.thinking_start_tag},
+            {"thinking_end_tag",          chat_parser_params.thinking_end_tag},
             {"samplers",                  samplers},
             {"speculative.types",         common_speculative_type_name_str(speculative.types)},
             {"timings_per_token",         timings_per_token},
@@ -198,6 +200,8 @@ json task_params::to_json(bool only_metrics) const {
         {"reasoning_loop_interventions", reasoning_loop_guard.interventions_max},
         {"reasoning_in_content",      chat_parser_params.reasoning_in_content},
         {"generation_prompt",         chat_parser_params.generation_prompt},
+        {"thinking_start_tag",        chat_parser_params.thinking_start_tag},
+        {"thinking_end_tag",          chat_parser_params.thinking_end_tag},
         {"samplers",                  samplers},
         {"speculative.types",         common_speculative_type_name_str(speculative.types)},
         {"timings_per_token",         timings_per_token},
@@ -446,6 +450,147 @@ static void task_result_filter_incomplete_partial_tool_calls(
     new_msg.tool_calls = std::move(filtered);
 }
 
+static bool task_result_is_space(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+static size_t task_result_skip_leading_space(const std::string & text, size_t pos = 0) {
+    while (pos < text.size() && task_result_is_space(text[pos])) {
+        ++pos;
+    }
+    return pos;
+}
+
+static bool task_result_generation_prompt_opens_thinking(const common_chat_parser_params & params) {
+    if (params.generation_prompt.empty() || params.thinking_start_tag.empty() || params.thinking_end_tag.empty()) {
+        return false;
+    }
+
+    const size_t start_pos = params.generation_prompt.rfind(params.thinking_start_tag);
+    if (start_pos == std::string::npos) {
+        return false;
+    }
+
+    const size_t end_pos = params.generation_prompt.rfind(params.thinking_end_tag);
+    return end_pos == std::string::npos || start_pos > end_pos;
+}
+
+static bool task_result_should_suppress_leading_thinking_syntax(const common_chat_parser_params & params) {
+    if (params.thinking_start_tag.empty() || params.thinking_end_tag.empty()) {
+        return false;
+    }
+
+    return task_result_generation_prompt_opens_thinking(params) ||
+           params.reasoning_format == COMMON_REASONING_FORMAT_NONE;
+}
+
+static bool task_result_generated_still_in_prefilled_close_tag(
+        const std::string & generated_text,
+        const std::string & thinking_end_tag) {
+    const size_t pos = task_result_skip_leading_space(generated_text);
+    const size_t len = generated_text.size() - pos;
+    if (len == 0) {
+        return true;
+    }
+    return len < thinking_end_tag.size() &&
+           generated_text.compare(pos, len, thinking_end_tag, 0, len) == 0;
+}
+
+static bool task_result_generated_still_in_prefilled_thinking_syntax(
+        const std::string                    & generated_text,
+        const common_chat_parser_params      & params) {
+    const size_t pos = task_result_skip_leading_space(generated_text);
+    const size_t len = generated_text.size() - pos;
+    if (len == 0) {
+        return true;
+    }
+
+    if (len < params.thinking_start_tag.size() &&
+            generated_text.compare(pos, len, params.thinking_start_tag, 0, len) == 0) {
+        return true;
+    }
+
+    if (task_result_generated_still_in_prefilled_close_tag(generated_text, params.thinking_end_tag)) {
+        return true;
+    }
+
+    if (generated_text.compare(pos, params.thinking_start_tag.size(), params.thinking_start_tag) == 0) {
+        const size_t after_start = pos + params.thinking_start_tag.size();
+        return generated_text.find(params.thinking_end_tag, after_start) == std::string::npos;
+    }
+
+    return false;
+}
+
+static bool task_result_content_still_in_leading_thinking_syntax(
+        const std::string                    & content,
+        const common_chat_parser_params      & params) {
+    const size_t pos = task_result_skip_leading_space(content);
+    const size_t len = content.size() - pos;
+    if (len == 0) {
+        return true;
+    }
+
+    if (len < params.thinking_start_tag.size() &&
+            content.compare(pos, len, params.thinking_start_tag, 0, len) == 0) {
+        return true;
+    }
+
+    if (task_result_generated_still_in_prefilled_close_tag(content, params.thinking_end_tag)) {
+        return true;
+    }
+
+    if (content.compare(pos, params.thinking_start_tag.size(), params.thinking_start_tag) == 0) {
+        const size_t after_start = pos + params.thinking_start_tag.size();
+        return content.find(params.thinking_end_tag, after_start) == std::string::npos;
+    }
+
+    return false;
+}
+
+static bool task_result_strip_prefilled_thinking_close_prefix(
+        std::string                         & content,
+        const common_chat_parser_params     & params) {
+    const size_t pos = task_result_skip_leading_space(content);
+
+    if (!params.thinking_start_tag.empty() &&
+            content.compare(pos, params.thinking_start_tag.size(), params.thinking_start_tag) == 0) {
+        const size_t after_start = pos + params.thinking_start_tag.size();
+        const size_t end_pos = content.find(params.thinking_end_tag, after_start);
+        if (end_pos != std::string::npos) {
+            content.erase(0, task_result_skip_leading_space(content, end_pos + params.thinking_end_tag.size()));
+            return true;
+        }
+    }
+
+    if (content.compare(pos, params.thinking_end_tag.size(), params.thinking_end_tag) == 0) {
+        content.erase(0, task_result_skip_leading_space(content, pos + params.thinking_end_tag.size()));
+        return true;
+    }
+
+    return false;
+}
+
+static void task_result_suppress_prefilled_thinking_close_tag(
+        const std::string                    & generated_text,
+        common_chat_msg                      & new_msg,
+        const common_chat_parser_params      & params) {
+    if (!task_result_should_suppress_leading_thinking_syntax(params)) {
+        return;
+    }
+
+    if (task_result_generated_still_in_prefilled_thinking_syntax(generated_text, params) ||
+            task_result_content_still_in_leading_thinking_syntax(new_msg.content, params)) {
+        new_msg.content.clear();
+        new_msg.reasoning_content.clear();
+        return;
+    }
+
+    if (task_result_strip_prefilled_thinking_close_prefix(new_msg.content, params) && new_msg.content.empty()) {
+        new_msg.reasoning_content.clear();
+    }
+}
+
 task_result_state::task_result_state(const common_chat_parser_params & chat_parser_params)
     : chat_parser_params(chat_parser_params)
     , oai_resp_id("resp_" + random_string())
@@ -470,6 +615,7 @@ common_chat_msg task_result_state::update_chat_msg(
         is_partial,
         chat_parser_params);
     if (!new_msg.empty()) {
+        task_result_suppress_prefilled_thinking_close_tag(generated_text, new_msg, chat_parser_params);
         new_msg.set_tool_call_ids(generated_tool_call_ids, gen_tool_call_id);
         if (filter_tool_calls && chat_parser_params.parse_tool_calls) {
             const bool has_complete_tool_calls = task_result_has_complete_partial_tool_calls(generated_text, new_msg);
@@ -754,6 +900,8 @@ task_params server_task::params_from_json_cmpl(
         params.chat_parser_params.reasoning_format = reasoning_format;
         params.chat_parser_params.reasoning_in_content = params.stream && (reasoning_format == COMMON_REASONING_FORMAT_DEEPSEEK_LEGACY);
         params.chat_parser_params.generation_prompt = json_value(data, "generation_prompt", std::string());
+        params.chat_parser_params.thinking_start_tag = json_value(data, "thinking_start_tag", std::string());
+        params.chat_parser_params.thinking_end_tag = json_value(data, "thinking_end_tag", std::string());
         params.sampling.generation_prompt = params.chat_parser_params.generation_prompt;
         SRV_DBG("Generation prompt: '%s'\n", params.chat_parser_params.generation_prompt.c_str());
         params.chat_parser_params.parse_tool_calls = json_value(data, "parse_tool_calls", false);
