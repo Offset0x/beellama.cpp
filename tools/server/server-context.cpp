@@ -2518,6 +2518,17 @@ private:
                 SLT_INF(*ret, "selected slot by LCP similarity, sim_best = %.3f (> %.3f thold), f_keep = %.3f\n",
                         sim_best, slot_prompt_similarity, f_keep);
 
+                if (ret->dm_adaptive) {
+                    if (server_adaptive_dm_should_preserve_for_continuation(sim_best, f_keep)) {
+                        SLT_INF(*ret, "adaptive dm: preserving state for continuation (sim=%.3f, keep=%.3f, n_max=%d)\n",
+                                sim_best, f_keep, ret->adaptive_n_max);
+                    } else {
+                        ret->reset_request_state();
+                        SLT_INF(*ret, "adaptive dm: reset state for prompt change (sim=%.3f, keep=%.3f)\n",
+                                sim_best, f_keep);
+                    }
+                }
+
                 // if we are about to lose a large portion of the existing context - save it in the prompt cache
                 if (f_keep < 0.5f) {
                     update_cache = true;
@@ -2550,6 +2561,11 @@ private:
 
             if (ret != nullptr) {
                 SLT_INF(*ret, "selected slot by LRU, t_last = %" PRId64 "\n", t_last);
+
+                if (ret->dm_adaptive) {
+                    ret->reset_request_state();
+                    SLT_INF(*ret, "%s", "adaptive dm: reset state for LRU slot selection\n");
+                }
 
                 update_cache = true;
             }
@@ -2739,6 +2755,12 @@ private:
             SLT_TRC(slot, "sampler params: \n%s\n", task.params.sampling.print().c_str());
         } else {
             slot.smpl.reset();
+        }
+
+        if (slot.can_speculate() && task.need_sampling() && slot.dm_adaptive) {
+            const int base_n_max = common_speculative_n_max(slot.spec.get(), task.params.speculative);
+            slot.reset_profit_if_config_changed(task.params.speculative, base_n_max,
+                                                (int32_t) slot.prompt.n_tokens());
         }
 
         slot.task = std::make_unique<const server_task>(std::move(task));
@@ -3374,6 +3396,10 @@ private:
                     // release slot linked with the task id
                     for (auto & slot : slots) {
                         if (slot.task && slot.task->id == task.id_target) {
+                            if (slot.dm_adaptive) {
+                                slot.reset_request_state();
+                                SLT_INF(slot, "%s", "adaptive dm: reset state for canceled task\n");
+                            }
                             slot.release();
                             break;
                         }

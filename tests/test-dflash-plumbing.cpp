@@ -1370,6 +1370,15 @@ int main(int argc, char ** argv) {
                  server_context.find("int n_draft_max = (dm_adaptive && adaptive_n_max >= 0) ? adaptive_n_max : base_n_max") != std::string::npos &&
                  server_context.find("else if (dm_adaptive && adaptive_n_max == 0)") != std::string::npos,
         "DFlash-local accept shrink must be removed and non-adaptive mode must ignore adaptive state");
+    ok &= expect(server_context.find("server_adaptive_dm_should_preserve_for_continuation(sim_best, f_keep)") != std::string::npos &&
+                 server_context.find("adaptive dm: preserving state for continuation") != std::string::npos &&
+                 server_context.find("adaptive dm: reset state for prompt change") != std::string::npos,
+        "adaptive DFlash state must reset on prompt changes while preserving true continuations");
+    ok &= expect(server_context.find("adaptive dm: reset state for LRU slot selection") != std::string::npos &&
+                 server_context.find("adaptive dm: reset state for canceled task") != std::string::npos,
+        "adaptive DFlash request state must reset on fresh LRU slots and canceled tasks");
+    ok &= expect(server_context.find("slot.reset_profit_if_config_changed(task.params.speculative, base_n_max") != std::string::npos,
+        "adaptive DFlash profit controller must refresh its config key when a task is launched");
     ok &= expect(context_h.find("profile_reduced_logits_ids_us") != std::string::npos &&
                  context_cpp.find("GGML_DFLASH_PROFILE_SYNC_SPLIT") != std::string::npos &&
                  context_cpp.find("reduced_logits_ids=") != std::string::npos &&
