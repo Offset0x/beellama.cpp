@@ -261,7 +261,7 @@ DFlash core args:
 | `--spec-draft-p-min`, `--draft-p-min` | `0.0` | Minimum draft probability gate. |
 | `--spec-draft-temp T` | `0.0` | DFlash drafter temperature. `0` greedy, positive uses sampled/Gumbel path, `auto` mirrors target temp. |
 | `--spec-dflash-cross-ctx N` | `512` | Recent target hidden-state tokens visible to the DFlash drafter. |
-| `--spec-dflash-max-slots N` | `1` | Max server slots with DFlash state; higher slots fall back to non-speculative decoding. |
+| `--spec-dflash-max-slots N` | Match `-np` | Max server slots with DFlash state; higher slots fall back to non-speculative decoding. Use this to cap DFlash below `-np`. |
 
 Flat DFlash:
 

@@ -1425,6 +1425,16 @@ int main(int argc, char ** argv) {
     ok &= expect(server_context.find("dflash_tg_batch_all_spec_slots") != std::string::npos &&
                  server_context.find("dflash multiseq target batching disabled") != std::string::npos,
         "server must not multi-seq batch pure TG DFlash views unless every sequence owns DFlash state");
+    ok &= expect(common_h.find("int32_t dflash_max_slots = 0") != std::string::npos &&
+                 server_context.find("params_base.speculative.dflash_max_slots > 0") != std::string::npos &&
+                 server_context.find("DFlash enabled for all %d slots") != std::string::npos,
+        "DFlash must default to all -np slots and use --spec-dflash-max-slots only as an explicit cap");
+    ok &= expect(speculative.find("llama_n_ctx_seq(ctx_dft)") != std::string::npos &&
+                 server_context.find("dflash_draft_ctx_per_slot * dflash_draft_slots_clamped") != std::string::npos &&
+                 server_context.find("params_dft.kv_unified = false") != std::string::npos,
+        "DFlash drafter KV retention must use partitioned per-slot context, not a unified shared pool");
+    ok &= expect(server_context.find("reduced-row-count-mismatch") != std::string::npos,
+        "DFlash reduced verifier must reject uneven multi-slot rows so compact output is not overwritten by internal ubatch splits");
 
     // dflash_diagnostic_debug_enabled must gate per-ubatch route logs
     ok &= expect(context_cpp.find("dflash_diagnostic_debug_enabled") != std::string::npos,

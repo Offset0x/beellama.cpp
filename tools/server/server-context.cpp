@@ -1360,6 +1360,7 @@ static bool dflash_batch_view_is_reduced_verify(
 
     std::vector<uint8_t> covered((size_t) view_n_tokens, 0);
     int covered_count = 0;
+    int expected_rows_per_slot = -1;
 
     for (const auto & slot : slots) {
         if (slot.state != SLOT_STATE_GENERATING || !slot.can_speculate() || slot.has_draft_tree || slot.spec_draft.empty()) {
@@ -1397,16 +1398,27 @@ static bool dflash_batch_view_is_reduced_verify(
             return true;
         };
 
+        int slot_rows = 0;
         for (int idx : slot.spec_i_batch) {
             if (!cover_index(idx)) {
                 return reject(idx < view_start || idx >= view_start + view_n_tokens
                         ? "spec-index-outside-view" : "duplicate-index");
             }
+            slot_rows++;
         }
         for (int idx : slot.spec_pad_i_batch) {
             if (!cover_index(idx)) {
                 return reject(idx < view_start || idx >= view_start + view_n_tokens
                         ? "pad-index-outside-view" : "duplicate-index");
+            }
+            slot_rows++;
+        }
+
+        if (slot_rows > 0) {
+            if (expected_rows_per_slot < 0) {
+                expected_rows_per_slot = slot_rows;
+            } else if (slot_rows != expected_rows_per_slot) {
+                return reject("reduced-row-count-mismatch");
             }
         }
     }
@@ -2066,9 +2078,16 @@ private:
                     return false;
                 }
                 const int block_size = llama_model_dflash_block_size(model_dft.get());
+                const int dflash_draft_slots = params_base.speculative.dflash_max_slots > 0
+                    ? params_base.speculative.dflash_max_slots
+                    : params_base.n_parallel;
+                const int dflash_draft_slots_clamped = std::max(1,
+                    std::min({ dflash_draft_slots, params_base.n_parallel, (int) LLAMA_DFLASH_MAX_SLOTS }));
+                const int dflash_draft_ctx_per_slot = params_dft.n_ctx;
+                params_dft.n_ctx = dflash_draft_ctx_per_slot * dflash_draft_slots_clamped;
                 params_dft.n_ubatch = LLAMA_DFLASH_MAX_SLOTS * block_size;
-                params_dft.n_parallel = std::max(1,
-                    std::min(params_base.speculative.dflash_max_slots, params_base.n_parallel));
+                params_dft.n_parallel = dflash_draft_slots_clamped;
+                params_dft.kv_unified = false;
             }
 
             params_base.speculative.model_dft = model_dft.get();
@@ -2217,7 +2236,11 @@ private:
         // runs inside common_speculative_init for slot 0, so dflash_capture must exist first).
         int dflash_slots_cap = 0;
         if (can_spec && params_base.speculative.type() == COMMON_SPECULATIVE_TYPE_DFLASH) {
-            dflash_slots_cap = std::max(1, std::min(params_base.speculative.dflash_max_slots, params_base.n_parallel));
+            const int dflash_requested_slots = params_base.speculative.dflash_max_slots > 0
+                ? params_base.speculative.dflash_max_slots
+                : params_base.n_parallel;
+            dflash_slots_cap = std::max(1,
+                std::min({ dflash_requested_slots, params_base.n_parallel, (int) LLAMA_DFLASH_MAX_SLOTS }));
             if (dflash_slots_cap < params_base.n_parallel) {
                 SRV_INF("DFlash enabled for slots 0..%d; slots %d+ will use non-speculative decode\n",
                         dflash_slots_cap - 1, dflash_slots_cap);

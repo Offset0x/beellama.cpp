@@ -2129,7 +2129,7 @@ struct common_speculative_impl_dflash : public common_speculative_impl {
     }
 
     int drafter_prefix_window() const {
-        const int n_ctx_dft = llama_n_ctx(ctx_dft);
+        const int n_ctx_dft = llama_n_ctx_seq(ctx_dft);
         return std::max(0, n_ctx_dft - block_size);
     }
 

@@ -381,7 +381,7 @@ struct common_params_speculative {
     int32_t tree_budget   = -1; // legacy total-node --tree-budget input; normalized after parsing
     bool    branch_budget_explicit = false;
     bool    legacy_tree_budget_explicit = false;
-    int32_t dflash_max_slots = 1; // max concurrent server slots that keep DFlash state
+    int32_t dflash_max_slots = 0; // max DFlash slots; 0 = match n_parallel / -np
     float   p_split = 0.1f;   // speculative decoding split probability
     float   p_min   = 0.0f;   // minimum speculative decoding probability (0 = disabled)
     float   sample_temp = 0.0f; // drafter sampling temperature (0 = greedy, >0 = Gumbel sampling)
