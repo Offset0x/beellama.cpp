@@ -192,6 +192,16 @@ int main(void) {
     assert(params.speculative.draft.p_min == 0.25f);
     assert(params.speculative.p_min == 0.25f);
 
+    params = common_params();
+    argv = {"binary_name", "--spec-draft-temp", "0.5"};
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+    assert(params.speculative.sample_temp == 0.5f);
+
+    params = common_params();
+    argv = {"binary_name", "--spec-draft-temp", "auto"};
+    assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+    assert(params.speculative.sample_temp == -1.0f);
+
     argv = {
         "binary_name",
         "--spec-dm-controller", "fringe",

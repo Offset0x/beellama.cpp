@@ -3790,6 +3790,17 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SPEC_DRAFT_TOP_K"));
     add_opt(common_arg(
+        {"--spec-draft-temp"}, "T",
+        string_format("drafter sampling temperature for Gumbel sampling (default: %.1f, 0 = greedy, >0 = Gumbel, auto = mirror target)", (double) params.speculative.sample_temp),
+        [](common_params & params, const std::string & value) {
+            if (value == "auto") {
+                params.speculative.sample_temp = -1.0f;
+            } else {
+                params.speculative.sample_temp = std::stof(value);
+            }
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SPEC_DRAFT_TEMP"));
+    add_opt(common_arg(
         {"--spec-dm-adaptive"},
         {"--no-spec-dm-adaptive"},
         string_format("enable adaptive draft-max controller (default: %s)", params.speculative.dm_adaptive ? "true" : "false"),
