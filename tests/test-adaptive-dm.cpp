@@ -355,6 +355,27 @@ int main() {
         assert(est.decide_profit_n_max(15) == 15);
     }
 
+    // Sustained acceptance collapse is different from a noisy low-acceptance
+    // warmup: if direct full-depth samples show almost no accepted tokens, the
+    // controller must enter no-spec baseline collection instead of keeping the
+    // same expensive DFlash horizon forever.
+    {
+        server_adaptive_dm_state weak;
+        weak.dm_profit_min_samples = 3;
+        weak.adaptive_n_max = 15;
+
+        for (int i = 0; i < 12; ++i) {
+            weak.observe_profit_acceptance(15, 0);
+            weak.observe_profit_timing(15, 18.0f, 115.0f, 2.0f, 135.0f);
+        }
+
+        assert(weak.decide_profit_n_max(15) == 0);
+        assert(weak.profit_acceptance_collapse_disabled);
+
+        weak.reset_request_state();
+        assert(!weak.profit_acceptance_collapse_disabled);
+    }
+
     // test baseline-best shuts speculation fully off after dwell instead of only downshifting
     {
         server_adaptive_dm_state weak;

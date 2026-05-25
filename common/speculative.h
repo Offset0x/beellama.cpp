@@ -121,6 +121,7 @@ bool common_dflash_cpu_ring_valid_after_write_for_test(
 
 bool common_dflash_should_refuse_large_prefill_fallback_for_test(
         int requested,
+        int captured,
         bool use_prefill_gpu,
         bool has_gpu_ring);
 

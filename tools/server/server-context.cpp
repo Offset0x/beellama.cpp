@@ -827,6 +827,12 @@ struct server_slot : server_adaptive_dm_state {
             return 0;
         }
 
+        if (dm_adaptive &&
+                dm_controller == COMMON_SPECULATIVE_DM_CONTROLLER_PROFIT &&
+                profit_acceptance_collapse_disabled) {
+            return 0;
+        }
+
         const int n_draft_min = common_speculative_n_min(get_spec(), task->params.speculative);
 
         const int base_n_max = common_speculative_n_max(get_spec(), task->params.speculative);
@@ -1637,6 +1643,7 @@ private:
     int  n_seq_max_full = 0;      // target n_seq_max after expansion (2*n_parallel_user)
     bool recurrent_expanded = true; // false = backup cells deferred, expand before first draft
     bool dflash_shared_drafter_batch_recurrent_logged = false;
+    size_t dflash_recurrent_draft_rr = 0;
 
     int32_t n_ctx; // total context for all clients / slots
 
@@ -3893,10 +3900,39 @@ private:
         std::vector<llama_tokens> batched_drafts(slots.size());
         std::vector<std::vector<float>> batched_log_probs(slots.size());
         const bool use_rejection_sampling = params_base.speculative.sample_temp > 0.0f && params_base.sampling.temp > 0.0f;
+        const bool dflash_recurrent_single_slot_cycle =
+            params_base.speculative.type() == COMMON_SPECULATIVE_TYPE_DFLASH && needs_reeval;
+        const bool dflash_recurrent_has_pending_prompt =
+            dflash_recurrent_single_slot_cycle &&
+            std::any_of(slots.begin(), slots.end(), [](const server_slot & slot) {
+                return slot.state == SLOT_STATE_STARTED || slot.state == SLOT_STATE_PROCESSING_PROMPT;
+            });
+        int dflash_recurrent_cycle_slot_id = -1;
+        if (dflash_recurrent_single_slot_cycle && !dflash_recurrent_has_pending_prompt && !slots.empty()) {
+            const size_t n_slots = slots.size();
+            dflash_recurrent_draft_rr %= n_slots;
+            for (size_t off = 0; off < n_slots; ++off) {
+                const size_t idx = (dflash_recurrent_draft_rr + off) % n_slots;
+                auto & slot = slots[idx];
+                const bool sampler_blocks_speculative =
+                    slot.smpl && common_sampler_blocks_speculative(slot.smpl.get());
+                if (slot.state == SLOT_STATE_GENERATING &&
+                        slot.can_speculate() &&
+                        slot.get_n_draft_max(params_base, false) > 0 &&
+                        !sampler_blocks_speculative) {
+                    dflash_recurrent_cycle_slot_id = slot.id;
+                    dflash_recurrent_draft_rr = (idx + 1) % n_slots;
+                    break;
+                }
+            }
+        }
         if (ctx_dft_shared) {
             int n_drafting = 0;
             for (auto & slot : slots) {
-                if (slot.state == SLOT_STATE_GENERATING && slot.can_speculate() && slot.get_n_draft_max(params_base, false) > 0) {
+                if (slot.state == SLOT_STATE_GENERATING &&
+                        slot.can_speculate() &&
+                        slot.get_n_draft_max(params_base, false) > 0 &&
+                        (!dflash_recurrent_single_slot_cycle || slot.id == dflash_recurrent_cycle_slot_id)) {
                     n_drafting++;
                 }
             }
@@ -3910,7 +3946,10 @@ private:
                 std::vector<int>                  batch_slot_ids;
 
                 for (auto & slot : slots) {
-                    if (slot.state == SLOT_STATE_GENERATING && slot.can_speculate() && slot.get_n_draft_max(params_base, false) > 0) {
+                    if (slot.state == SLOT_STATE_GENERATING &&
+                            slot.can_speculate() &&
+                            slot.get_n_draft_max(params_base, false) > 0 &&
+                            (!dflash_recurrent_single_slot_cycle || slot.id == dflash_recurrent_cycle_slot_id)) {
                         batch_specs.push_back(slot.get_spec());
                         batch_id_lasts.push_back(slot.sampled);
                         batch_slot_ids.push_back(slot.id);
@@ -3943,6 +3982,18 @@ private:
                 continue;
             }
 
+            if (dflash_recurrent_single_slot_cycle &&
+                    dflash_recurrent_has_pending_prompt &&
+                    slot.can_speculate()) {
+                continue;
+            }
+
+            if (dflash_recurrent_single_slot_cycle &&
+                    dflash_recurrent_cycle_slot_id >= 0 &&
+                    slot.can_speculate() &&
+                    slot.id != dflash_recurrent_cycle_slot_id) {
+                continue;
+            }
 
             // check if we can batch this slot with the previous one
             if (!slot_batched) {
@@ -4892,6 +4943,14 @@ private:
                 }
             }
 
+            if (needs_reeval && dflash_multiseq_n_unique > 1) {
+                // Recurrent/hybrid target verification needs per-seq ubatches
+                // until multi-slot recurrent capture/tape/rollback is proven safe.
+                dflash_multiseq_block_reason = "target-recurrent-multiseq";
+                dflash_multiseq_block_seq = unique_seqs[1];
+                return false;
+            }
+
             // Graph-embedded GPU hidden capture stores one fixed row count per
             // ubatch. Uneven per-seq rows split into multiple ubatches and would
             // leave the longer slot with only the final ubatch's hidden rows.
@@ -5117,6 +5176,11 @@ private:
             };
 
             if (params_base.speculative.type() == COMMON_SPECULATIVE_TYPE_DFLASH) {
+                auto dflash_slot_runtime_enabled = [](const server_slot & slot) {
+                    return !(slot.dm_adaptive &&
+                            server_adaptive_dm_uses_profit_controller(slot.dm_controller) &&
+                            slot.profit_acceptance_collapse_disabled);
+                };
                 bool dflash_view_has_generating = false;
                 std::vector<server_slot *> dflash_slots_in_view;
                 for (auto & slot : slots) {
@@ -5129,7 +5193,7 @@ private:
                     }
                     dflash_slots_in_view.push_back(&slot);
 
-                    if (slot.state == SLOT_STATE_GENERATING) {
+                    if (slot.state == SLOT_STATE_GENERATING && dflash_slot_runtime_enabled(slot)) {
                         dflash_capture_needed_for_view = true;
                         dflash_view_has_generating = true;
                     }
@@ -5198,6 +5262,29 @@ private:
 
             const int64_t t_verify_start = ggml_time_us();
             const int ret = llama_decode(ctx_tgt, batch_view);
+            if (params_base.speculative.type() == COMMON_SPECULATIVE_TYPE_DFLASH &&
+                    dflash_server_crash_trace_enabled() &&
+                    !pending_prefill_flushes.empty()) {
+                for (auto & pf : pending_prefill_flushes) {
+                    int32_t planned = -1;
+                    int32_t written = -1;
+                    const bool has_plan = llama_dflash_prefill_capture_info(ctx_tgt, pf.slot_id, &planned, &written);
+                    const int64_t prefill_gpu_n = llama_dflash_prefill_gpu_n_tokens(ctx_tgt, pf.slot_id);
+                    llama_dflash_set_active_slot(ctx_tgt, pf.slot_id);
+                    const int64_t cpu_hidden_n = llama_get_layer_hidden_n_tokens(ctx_tgt, 0);
+                    SRV_INF("dflash prefill capture result: slot=%d requested=%d src_offset=%d ret=%d plan=%d planned=%d written=%d prefill_gpu_active=%d prefill_gpu_n=%lld cpu_hidden_n=%lld\n",
+                            pf.slot_id,
+                            pf.span.n_tokens,
+                            pf.span.src_offset,
+                            ret,
+                            has_plan ? 1 : 0,
+                            planned,
+                            written,
+                            llama_dflash_prefill_gpu_active(ctx_tgt) ? 1 : 0,
+                            (long long) prefill_gpu_n,
+                            (long long) cpu_hidden_n);
+                }
+            }
             if (ret == 0 && dflash_reduce_this_view) {
                 int32_t * compact_argmax = llama_get_logits_argmax(ctx_tgt);
                 const int32_t compact_n = llama_get_logits_argmax_n(ctx_tgt);
@@ -5450,7 +5537,12 @@ private:
                 // silently corrupting the drafter's cross-attention context on every subsequent
                 // verify. Fires correctly on the fallback non-spec path during generation
                 // (draft too small → single-token decode), where slot.sampled was just decoded.
-                if (slot.can_speculate() && slot.n_decoded > 0) {
+                const bool dflash_request_disabled =
+                    params_base.speculative.type() == COMMON_SPECULATIVE_TYPE_DFLASH &&
+                    slot.dm_adaptive &&
+                    server_adaptive_dm_uses_profit_controller(slot.dm_controller) &&
+                    slot.profit_acceptance_collapse_disabled;
+                if (slot.can_speculate() && slot.n_decoded > 0 && !dflash_request_disabled) {
                     if (params_base.speculative.type() == COMMON_SPECULATIVE_TYPE_DFLASH) {
                         llama_dflash_set_active_slot(ctx_tgt, slot.id);
                     }

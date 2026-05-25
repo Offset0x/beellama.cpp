@@ -1482,6 +1482,8 @@ int main(int argc, char ** argv) {
     // Non-overlapping prefill ubatches must suppress eval callback
     ok &= expect(context_cpp.find("dflash_suppress_callback_for_view") != std::string::npos,
         "decode must suppress eval callback for no-intersection prefill ubatches");
+    ok &= expect(context_cpp.find("memory->set_force_split_seq(false)") != std::string::npos,
+        "DFlash capture disable must clear force_split_seq so adaptive no-spec fallback can batch like normal target decoding");
     ok &= expect(context_cpp.find("dflash_mixed_capture_supported") != std::string::npos &&
                  context_cpp.find("dflash mixed capture suppressed") != std::string::npos,
         "decode must suppress DFlash capture for mixed ubatches that include non-DFlash slots");
@@ -1505,6 +1507,23 @@ int main(int argc, char ** argv) {
                  server_context.find("target-recurrent") != std::string::npos &&
                  server_context.find("!needs_reeval") != std::string::npos,
         "DFlash shared drafter batching must be disabled for recurrent/hybrid targets until cross-slot recurrent isolation is proven");
+    ok &= expect(server_context.find("target-recurrent-multiseq") != std::string::npos &&
+                 server_context.find("needs_reeval && dflash_multiseq_n_unique > 1") != std::string::npos,
+        "DFlash target verification must not multi-seq batch recurrent/hybrid slots because target recurrent capture and rollback are only proven per slot");
+    ok &= expect(server_context.find("dflash_recurrent_draft_rr") != std::string::npos &&
+                 server_context.find("dflash_recurrent_has_pending_prompt") != std::string::npos &&
+                 server_context.find("dflash_recurrent_cycle_slot_id") != std::string::npos &&
+                 server_context.find("dflash_recurrent_has_pending_prompt &&\n                    slot.can_speculate()") != std::string::npos &&
+                 server_context.find("slot.id != dflash_recurrent_cycle_slot_id") != std::string::npos,
+        "DFlash recurrent/hybrid scheduling must keep prompt prefill and speculative generation isolated, then select one generation slot per cycle");
+    ok &= expect(server_context.find("profit_acceptance_collapse_disabled") != std::string::npos &&
+                 server_context.find("dflash_slot_runtime_enabled") != std::string::npos &&
+                 server_context.find("dflash_request_disabled") != std::string::npos,
+        "DFlash adaptive collapse must disable request-local capture/update overhead instead of continuing expensive baseline-ring maintenance");
+    ok &= expect(context_cpp.find("const size_t total_ids = (size_t) K * (size_t) n_outputs_all") != std::string::npos &&
+                 context_cpp.find("const size_t offset_ids = (size_t) K * (size_t) n_outputs_prev") != std::string::npos &&
+                 context_cpp.find("logits_argmax_count = (int32_t) (n_outputs_prev + n_outputs)") != std::string::npos,
+        "DFlash compact reduced-verifier logits must accumulate across split target ubatches instead of keeping only the last split");
     ok &= expect(speculative.find("actual_written != n_accepted") != std::string::npos &&
                  speculative.find("incomplete target hidden capture") != std::string::npos &&
                  speculative.find("refusing to advance DFlash ring") != std::string::npos,
@@ -1537,12 +1556,15 @@ int main(int argc, char ** argv) {
     ok &= expect(speculative.find("capture_layers.assign") != std::string::npos,
         "constructor must assign member capture_layers, not declare a local that shadows it");
 
-    // Large prefill cannot fallback to 1-token verify capture
-    ok &= expect(common_dflash_should_refuse_large_prefill_fallback_for_test(764, false, true),
-        "large CPU-only prefill fallback with GPU ring must be refused");
-    ok &= expect(!common_dflash_should_refuse_large_prefill_fallback_for_test(4, false, true),
+    // Large prefill cannot fallback to incomplete verify capture, but a complete
+    // callback capture is valid and should keep the DFlash ring alive.
+    ok &= expect(common_dflash_should_refuse_large_prefill_fallback_for_test(764, 16, false, true),
+        "large incomplete CPU-only prefill fallback with GPU ring must be refused");
+    ok &= expect(!common_dflash_should_refuse_large_prefill_fallback_for_test(764, 764, false, true),
+        "large complete CPU fallback must be allowed when GPU prefill staging is unavailable");
+    ok &= expect(!common_dflash_should_refuse_large_prefill_fallback_for_test(4, 4, false, true),
         "small verify-sized CPU fallback must be allowed");
-    ok &= expect(!common_dflash_should_refuse_large_prefill_fallback_for_test(764, true, true),
+    ok &= expect(!common_dflash_should_refuse_large_prefill_fallback_for_test(764, 0, true, true),
         "prefill GPU capture must not be refused even for large spans");
 
     // Reduced verifier must not be disabled by reasoning state alone

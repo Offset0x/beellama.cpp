@@ -2611,12 +2611,6 @@ struct common_speculative_impl_dflash : public common_speculative_impl {
                 return 0;
             }
         } else {
-            if (n_tokens > LLAMA_DFLASH_MAX_VERIFY_TOKENS && gpu_ring_handle) {
-                LOG_ERR("dflash prefill flush expected GPU staging for large suffix span but prefill_gpu is inactive: requested=%d seq=%d; refusing fallback ring write\n",
-                        n_tokens, seq_id);
-                return 0;
-            }
-
             n_src_layers = llama_get_n_layer_hiddens(ctx_tgt);
             if (n_src_layers == 0) {
                 if (profile_enabled(DFLASH_PROFILE_PREFILL)) {
@@ -2632,6 +2626,13 @@ struct common_speculative_impl_dflash : public common_speculative_impl {
                     LOG_INF("dflash prefill flush skipped: source=cpu/verify_gpu reason=no-captured-tokens captured=0 n_tokens_arg=%d src_offset=%d\n",
                             n_tokens, src_offset);
                 }
+                return 0;
+            }
+
+            if (common_dflash_should_refuse_large_prefill_fallback_for_test(
+                        n_tokens, (int) captured, use_prefill_gpu, gpu_ring_handle != nullptr)) {
+                LOG_ERR("dflash prefill flush expected GPU staging for large suffix span but only partial fallback capture is available: captured=%lld requested=%d seq=%d; refusing partial ring write\n",
+                        (long long) captured, n_tokens, seq_id);
                 return 0;
             }
 
@@ -4046,9 +4047,13 @@ bool common_dflash_cpu_ring_valid_after_write_for_test(
 
 bool common_dflash_should_refuse_large_prefill_fallback_for_test(
         int requested,
+        int captured,
         bool use_prefill_gpu,
         bool has_gpu_ring) {
-    return !use_prefill_gpu && requested > LLAMA_DFLASH_MAX_VERIFY_TOKENS && has_gpu_ring;
+    return !use_prefill_gpu &&
+        requested > LLAMA_DFLASH_MAX_VERIFY_TOKENS &&
+        has_gpu_ring &&
+        captured < requested;
 }
 
 bool common_dflash_cpu_ring_valid_after_source_write_for_test(

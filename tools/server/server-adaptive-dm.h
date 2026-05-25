@@ -316,6 +316,7 @@ struct server_adaptive_dm_state {
     int32_t profit_pending_n_draft = 0;
     int32_t profit_pending_n_accepted = 0;
     bool    profit_pending_tree = false;
+    bool    profit_acceptance_collapse_disabled = false;
     uint32_t profit_epoch = 0;
     float   profit_current_score = 0.0f;
     int32_t profit_last_recommended_n = -1;
@@ -355,6 +356,7 @@ struct server_adaptive_dm_state {
         profit_pending_n_draft = 0;
         profit_pending_n_accepted = 0;
         profit_pending_tree = false;
+        profit_acceptance_collapse_disabled = false;
         profit_consecutive_below_profit = 0;
         profit_current_score = 0.0f;
         profit_last_recommended_n = -1;
@@ -432,6 +434,32 @@ struct server_adaptive_dm_state {
     bool profit_expects_baseline_sample() const {
         return profit_baseline_probe_pending ||
             adaptive_n_max == 0;
+    }
+
+    bool profit_should_collect_baseline_after_acceptance_collapse(int current_n) const {
+        if (current_n <= 0 || current_n >= PROFIT_DEPTHS || profit_baseline_ready()) {
+            return false;
+        }
+
+        const int min_direct_samples = std::max(12, dm_profit_min_samples * 4);
+        if (profit_depth[current_n].samples < min_direct_samples) {
+            return false;
+        }
+
+        bool positions_ready = false;
+        const float expected_accept = server_adaptive_dm_survival_expected_accept(
+                profit_pos_accept_ewma,
+                profit_pos_samples,
+                PROFIT_POSITIONS,
+                current_n,
+                dm_profit_min_samples,
+                &positions_ready);
+        if (!positions_ready) {
+            return false;
+        }
+
+        const float low_accept_threshold = std::max(0.75f, std::min(2.0f, (float) current_n * 0.10f));
+        return expected_accept <= low_accept_threshold;
     }
 
     void profit_mark_baseline_probe() {
@@ -533,6 +561,15 @@ struct server_adaptive_dm_state {
         const bool baseline_ready = profit_baseline_ready();
         if (baseline_ready) {
             baseline_score = server_adaptive_dm_score(1.0f, profit_baseline.cycle_ms);
+        }
+        if (profit_should_collect_baseline_after_acceptance_collapse(current_n)) {
+            profit_acceptance_collapse_disabled = true;
+            profit_current_score = 0.0f;
+            profit_last_recommended_n = 0;
+            LOG_INF("adaptive-dm: disabling DFlash for request after sustained low acceptance "
+                    "(current_n=%d samples=%d bucket=%d)\n",
+                    current_n, profit_depth[current_n].samples, profit_key.context_bucket);
+            return 0;
         }
 
         for (int i = 0; i < n_candidates; ++i) {

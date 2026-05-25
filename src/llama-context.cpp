@@ -1792,6 +1792,9 @@ void llama_context::set_dflash_capture_active(bool active) {
             cparams.hidden_gpu_seqs[s] = nullptr;
             cparams.tape_gpu_seqs[s] = nullptr;
         }
+        if (memory) {
+            memory->set_force_split_seq(false);
+        }
     }
 
     cparams.dflash_capture_layers.clear();
@@ -6463,19 +6466,29 @@ int llama_context::decode(const llama_batch & batch_inp) {
             const int64_t total_elems = ggml_nelements(t_argmax);
             const int K = (int)(total_elems / (2 * n_outputs));
             const int n_ids = K * n_outputs;
+            const size_t total_ids = (size_t) K * (size_t) n_outputs_all;
+            const size_t offset_ids = (size_t) K * (size_t) n_outputs_prev;
             const size_t ids_bytes = (size_t) n_ids * sizeof(int32_t);
             const size_t probs_bytes = (size_t) n_ids * sizeof(float);
             const bool profile = dflash_capture && dflash_capture->profile;
             const int64_t t_start_us = profile ? ggml_time_us() : 0;
-            logits_argmax_buf.resize(n_ids);
+            if (logits_argmax_buf.empty()) {
+                logits_argmax_buf.resize(total_ids);
+                logits_argmax_prob_buf.resize(total_ids);
+                logits_argmax_k = K;
+            } else {
+                GGML_ASSERT(logits_argmax_k == K);
+                GGML_ASSERT(logits_argmax_buf.size() == total_ids);
+                GGML_ASSERT(logits_argmax_prob_buf.size() == total_ids);
+            }
+            GGML_ASSERT(offset_ids + (size_t) n_ids <= logits_argmax_buf.size());
             const int64_t t_ids_start_us = profile ? ggml_time_us() : 0;
-            ggml_backend_tensor_get_async(backend_argmax, t_argmax, logits_argmax_buf.data(), 0, ids_bytes);
+            ggml_backend_tensor_get_async(backend_argmax, t_argmax, logits_argmax_buf.data() + offset_ids, 0, ids_bytes);
             if (profile) {
                 dflash_capture->profile_reduced_logits_ids_us += ggml_time_us() - t_ids_start_us;
             }
-            logits_argmax_prob_buf.resize(n_ids);
             const int64_t t_probs_start_us = profile ? ggml_time_us() : 0;
-            ggml_backend_tensor_get_async(backend_argmax, t_argmax, logits_argmax_prob_buf.data(), ids_bytes, probs_bytes);
+            ggml_backend_tensor_get_async(backend_argmax, t_argmax, logits_argmax_prob_buf.data() + offset_ids, ids_bytes, probs_bytes);
             if (profile) {
                 dflash_capture->profile_reduced_logits_probs_us += ggml_time_us() - t_probs_start_us;
                 const int64_t elapsed_us = ggml_time_us() - t_start_us;
@@ -6483,8 +6496,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 dflash_capture->profile_output_extract_us += elapsed_us;
                 dflash_capture->profile_reduced_logits_bytes += ids_bytes + probs_bytes;
             }
-            logits_argmax_count = n_outputs;
-            logits_argmax_k = K;
+            logits_argmax_count = (int32_t) (n_outputs_prev + n_outputs);
         }
 
         // extract logits unless this ubatch is known to consume the compact
