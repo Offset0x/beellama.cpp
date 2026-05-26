@@ -20,6 +20,17 @@ static std::string read_file(const std::string & path) {
     return ss.str();
 }
 
+static std::string read_file_optional(const std::string & path) {
+    std::ifstream file(path);
+    if (!file.good()) {
+        return "";
+    }
+
+    std::ostringstream ss;
+    ss << file.rdbuf();
+    return ss.str();
+}
+
 static bool expect(bool ok, const char * message) {
     if (!ok) {
         std::fprintf(stderr, "%s\n", message);
@@ -66,6 +77,14 @@ int main(int argc, char ** argv) {
     const std::string llama_ext_h = read_file(root + "/src/llama-ext.h");
     const std::string sampling_h = read_file(root + "/common/sampling.h");
     const std::string sampling_cpp = read_file(root + "/common/sampling.cpp");
+    const std::string ggml_h = read_file(root + "/ggml/include/ggml.h");
+    const std::string ggml_common_h = read_file(root + "/ggml/src/ggml-common.h");
+    const std::string ggml_c = read_file(root + "/ggml/src/ggml.c");
+    const std::string ggml_quants_h = read_file(root + "/ggml/src/ggml-quants.h");
+    const std::string ggml_quants_c = read_file(root + "/ggml/src/ggml-quants.c");
+    const std::string ggml_cpu_c = read_file(root + "/ggml/src/ggml-cpu/ggml-cpu.c");
+    const std::string ggml_cpu_quants_h = read_file(root + "/ggml/src/ggml-cpu/quants.h");
+    const std::string ggml_cpu_quants_c = read_file(root + "/ggml/src/ggml-cpu/quants.c");
     const std::string server_context = read_file(root + "/tools/server/server-context.cpp");
     const std::string server_adaptive_dm_h = read_file(root + "/tools/server/server-adaptive-dm.h");
     const std::string server_task = read_file(root + "/tools/server/server-task.cpp");
@@ -100,6 +119,13 @@ int main(int argc, char ** argv) {
     const std::string cuda_gdn = read_file(root + "/ggml/src/ggml-cuda/gated_delta_net.cu");
     const std::string cuda_reg = read_file(root + "/ggml/src/ggml-cuda/ggml-cuda.cu");
     const std::string cuda_fattn = read_file(root + "/ggml/src/ggml-cuda/fattn.cu");
+    const std::string cuda_common = read_file(root + "/ggml/src/ggml-cuda/common.cuh");
+    const std::string cuda_dequantize = read_file(root + "/ggml/src/ggml-cuda/dequantize.cuh");
+    const std::string cuda_cpy = read_file(root + "/ggml/src/ggml-cuda/cpy.cu");
+    const std::string cuda_cpy_utils = read_file(root + "/ggml/src/ggml-cuda/cpy-utils.cuh");
+    const std::string cuda_getrows = read_file(root + "/ggml/src/ggml-cuda/getrows.cu");
+    const std::string cuda_set_rows = read_file(root + "/ggml/src/ggml-cuda/set-rows.cu");
+    const std::string cuda_fattn_common = read_file(root + "/ggml/src/ggml-cuda/fattn-common.cuh");
     const std::string cuda_fattn_vec_q4_0_q4_0 = read_file(root + "/ggml/src/ggml-cuda/template-instances/fattn-vec-instance-q4_0-q4_0.cu");
     const std::string cuda_fattn_vec_q4_1_q4_1 = read_file(root + "/ggml/src/ggml-cuda/template-instances/fattn-vec-instance-q4_1-q4_1.cu");
     const std::string cuda_fattn_vec_q5_0_q5_0 = read_file(root + "/ggml/src/ggml-cuda/template-instances/fattn-vec-instance-q5_0-q5_0.cu");
@@ -110,6 +136,9 @@ int main(int argc, char ** argv) {
     const std::string cuda_fattn_vec_q8_0_turbo3_tcq = read_file(root + "/ggml/src/ggml-cuda/template-instances/fattn-vec-instance-q8_0-turbo3_tcq.cu");
     const std::string cuda_fattn_vec_turbo3_tcq_q8_0 = read_file(root + "/ggml/src/ggml-cuda/template-instances/fattn-vec-instance-turbo3_tcq-q8_0.cu");
     const std::string cuda_fattn_vec_turbo3_tcq_turbo3_tcq = read_file(root + "/ggml/src/ggml-cuda/template-instances/fattn-vec-instance-turbo3_tcq-turbo3_tcq.cu");
+    const std::string cuda_fattn_vec_q6_0_q6_0 = read_file_optional(root + "/ggml/src/ggml-cuda/template-instances/fattn-vec-instance-q6_0-q6_0.cu");
+    const std::string cuda_fattn_vec_q6_0_q8_0 = read_file_optional(root + "/ggml/src/ggml-cuda/template-instances/fattn-vec-instance-q6_0-q8_0.cu");
+    const std::string cuda_fattn_vec_q8_0_q6_0 = read_file_optional(root + "/ggml/src/ggml-cuda/template-instances/fattn-vec-instance-q8_0-q6_0.cu");
     const std::string cuda_template_generator = read_file(root + "/ggml/src/ggml-cuda/template-instances/generate_cu_files.py");
     const std::string metal = read_file(root + "/ggml/src/ggml-metal/ggml-metal.metal");
 
@@ -288,6 +317,37 @@ int main(int argc, char ** argv) {
         "turbo3_tcq/turbo3_tcq FlashAttention template instance must include D=512");
     ok &= expect(cuda_template_generator.find("DECL_FATTN_VEC_CASE(512, {type_k}, {type_v});") != std::string::npos,
         "CUDA template generator must preserve D=512 quantized FlashAttention vector instances");
+    ok &= expect(ggml_h.find("GGML_TYPE_Q6_0") != std::string::npos &&
+                 ggml_common_h.find("block_q6_0") != std::string::npos &&
+                 ggml_c.find(".type_name                = \"q6_0\"") != std::string::npos,
+        "GGML core type metadata must register q6_0");
+    ok &= expect(ggml_quants_h.find("quantize_row_q6_0_ref") != std::string::npos &&
+                 ggml_quants_h.find("dequantize_row_q6_0") != std::string::npos &&
+                 ggml_quants_c.find("quantize_row_q6_0_ref") != std::string::npos &&
+                 ggml_quants_c.find("dequantize_row_q6_0") != std::string::npos,
+        "GGML quantization must provide q6_0 reference quantize/dequantize functions");
+    ok &= expect(ggml_cpu_quants_h.find("ggml_vec_dot_q6_0_q8_0") != std::string::npos &&
+                 ggml_cpu_quants_c.find("ggml_vec_dot_q6_0_q8_0_generic") != std::string::npos &&
+                 ggml_cpu_c.find("[GGML_TYPE_Q6_0]") != std::string::npos,
+        "CPU backend traits must support q6_0 quantize and dot-product paths");
+    ok &= expect(arg_cpp.find("GGML_TYPE_Q6_0") != std::string::npos &&
+                 read_file(root + "/tools/llama-bench/llama-bench.cpp").find("GGML_TYPE_Q6_0") != std::string::npos,
+        "CLI and benchmark cache-type parsers must expose q6_0");
+    ok &= expect(cuda_common.find("ggml_cuda_type_traits<GGML_TYPE_Q6_0>") != std::string::npos &&
+                 cuda_dequantize.find("dequantize_q6_0") != std::string::npos &&
+                 cuda_cpy_utils.find("quantize_f32_q6_0_block") != std::string::npos &&
+                 cuda_getrows.find("GGML_TYPE_Q6_0") != std::string::npos &&
+                 cuda_set_rows.find("GGML_TYPE_Q6_0") != std::string::npos &&
+                 cuda_cpy.find("GGML_TYPE_Q6_0") != std::string::npos &&
+                 cuda_cpp.find("GGML_TYPE_Q6_0") != std::string::npos,
+        "CUDA backend must support q6_0 SET_ROWS, GET_ROWS, CPY, and capability checks");
+    ok &= expect(cuda_fattn_common.find("vec_dot_fattn_vec_KQ_q6_0") != std::string::npos &&
+                 cuda_fattn_common.find("dequantize_V_q6_0") != std::string::npos &&
+                 cuda_fattn.find("FATTN_VEC_CASES_ALL_D_512(GGML_TYPE_Q6_0, GGML_TYPE_Q6_0)") != std::string::npos &&
+                 cuda_fattn_vec_q6_0_q6_0.find("DECL_FATTN_VEC_CASE(512, GGML_TYPE_Q6_0, GGML_TYPE_Q6_0);") != std::string::npos &&
+                 cuda_fattn_vec_q6_0_q8_0.find("DECL_FATTN_VEC_CASE(512, GGML_TYPE_Q6_0, GGML_TYPE_Q8_0);") != std::string::npos &&
+                 cuda_fattn_vec_q8_0_q6_0.find("DECL_FATTN_VEC_CASE(512, GGML_TYPE_Q8_0, GGML_TYPE_Q6_0);") != std::string::npos,
+        "CUDA FlashAttention must dispatch and instantiate q6_0 KV cache pairs through D=512");
     ok &= expect(arch_cpp.find("{ LLM_ARCH_DFLASH,") != std::string::npos,
         "upstream dflash architecture must be registered separately");
     ok &= expect(convert_py.find("from conversion import") != std::string::npos,
