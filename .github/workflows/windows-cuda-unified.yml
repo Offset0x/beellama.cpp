@@ -1,6 +1,8 @@
-name: Windows CUDA 13.1 (Unified Build)
+name: Windows CUDA 13.1 (Build v0.3.0 via gemma cache)
 
 on:
+  # Keep the run scoped to gemma-4-31b so GitHub can restore that branch's cache.
+  # The checkout step below compiles the v0.3.0 branch instead.
   push:
     branches:
       - 'gemma-4-31b'
@@ -9,21 +11,25 @@ on:
 jobs:
   windows-cuda-unified:
     runs-on: windows-2022
+
     steps:
-      - name: Clone
+      - name: Clone v0.3.0 source
         uses: actions/checkout@v6
         with:
+          ref: 'v0.3.0'
           fetch-depth: 0
 
-      - name: Install ccache
+      - name: Install ccache and restore the existing gemma cache
         uses: ggml-org/ccache-action@v1.2.21
         with:
+          # Keep this key IDENTICAL to the old workflow for cache reuse.
           key: windows-cuda-13.1-unified
           variant: ccache
-          evict-old-files: 1d
+          # Preserve entries longer for future incremental builds.
+          evict-old-files: 30d
+          verbose: 1
 
-      # USING THEIR OFFICIAL LOCAL CUDA SETUP ACTION
-      - name: Install Cuda Toolkit
+      - name: Install CUDA Toolkit
         uses: ./.github/actions/windows-setup-cuda
         with:
           cuda_version: '13.1'
@@ -32,7 +38,7 @@ jobs:
         run: |
           choco install ninja
 
-      - name: Build (Merged CPU + CUDA Flags)
+      - name: Build merged CPU + CUDA package
         shell: cmd
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
@@ -52,12 +58,17 @@ jobs:
           set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
           cmake --build build --config Release -j %NINJA_JOBS%
 
+      - name: Show ccache statistics
+        shell: cmd
+        run: |
+          ccache --show-stats
+
       - name: Pack artifacts
         run: |
-          7z a -snl llama-bin-win-cuda-13.1.zip .\build\bin\Release\*
+          7z a -snl llama-bin-win-cuda-13.1-v0.3.0.zip .\build\bin\Release\*
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:
-          path: llama-bin-win-cuda-13.1.zip
-          name: llama-bin-win-cuda-13.1.zip
+          path: llama-bin-win-cuda-13.1-v0.3.0.zip
+          name: llama-bin-win-cuda-13.1-v0.3.0.zip
